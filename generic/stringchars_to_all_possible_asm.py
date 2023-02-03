@@ -15,14 +15,14 @@ import binascii
 
 somechars = b"\x01\x01\x03\x04\x06\x80"
 
-output = [''.join(p) for p in permutations(somechars)]
+output = [''.join(str(p)) for p in permutations(somechars)]
 output = sorted(set(output))
 
 md = Cs(CS_ARCH_X86, CS_MODE_32)
 
 for x in range(0, len(output)):
-    print("\"\\x%s" % "\\x".join(y.encode('hex') for y in output[x]) + "\"")
-    for i in md.disasm(output[x], 0):
-        print("%s\t%s" % (i.mnemonic, i.op_str))
+    print(("\"\\x%s" % "\\x".join(str(y.encode().hex()) for y in output[x]) + "\""))
+    for i in md.disasm(output[x].encode(), 0):
+        print(("%s\t%s" % (i.mnemonic, i.op_str)))
     print("\n")
 

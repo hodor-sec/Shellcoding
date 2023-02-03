@@ -94,9 +94,9 @@ class InvalidCharResulted(Exception):
 def dbg(x, raw = False):
     if DEBUG:
         if raw:
-            print(x)
+            print x
         else:
-            print('[dbg] ' + x)
+            print '[dbg] ' + x
 
 def compose(num):
     ret = 0
@@ -284,7 +284,7 @@ def gen(dword, prev, alphabet):
             break
 
     if val != dword:
-        print('\n[!] COMPUTATION FAILURE: 0x%08x != 0x%08x' % (val, dword))
+        print '\n[!] COMPUTATION FAILURE: 0x%08x != 0x%08x' % (val, dword)
         sys.exit(-1)
 
     ret = ''.join(pr)
@@ -329,7 +329,7 @@ def process(inp, prepend_init = PREPEND_INIT):
     return out
 
 def usage():
-    print('''
+    print '''
     :: printable-shellcode.py - Utility generating a ASCII-printable shellcode
                                 out of provided binary file (ASCII encoder).
         Mariusz B. / mgeeky, '17
@@ -345,38 +345,38 @@ Where:
                         standard T00WT00W 32-bit windows egghunter
     0xValue         - single DWORD value, prepended with 0x to encode.
     output-file     - file to store result of ASCII encoding, or '-' for stdout
-''')
+'''
 
 def display_output(out):
-    print('[+] SHELLCODE ENCODED PROPERLY. Resulted length: %d bytes' % (len(out)))
-    print()
-    print('-' * 80)
-    print(out)
-    print('-' * 80)
-    print()
-    print('[+] HEX FORM:') 
-    print(''.join(['%02x' % ord(c) for c in out]))
-    print()
-    print('[+] ESCAPED-HEX FORM:') 
-    print(''.join(['\\x%02x' % ord(c) for c in out]))
-    print() 
-    print('[+] PYTHON COMPACT SEXY FORM:')
+    print '[+] SHELLCODE ENCODED PROPERLY. Resulted length: %d bytes' % (len(out))
+    print
+    print '-' * 80
+    print out
+    print '-' * 80
+    print
+    print '[+] HEX FORM:' 
+    print ''.join(['%02x' % ord(c) for c in out])
+    print
+    print '[+] ESCAPED-HEX FORM:' 
+    print ''.join(['\\x%02x' % ord(c) for c in out])
+    print 
+    print '[+] PYTHON COMPACT SEXY FORM:'
     buf = '\tshellcode += r"'
     for i in range(len(out)):
         if i % 20 == 0 and i > 0:
             buf += '"\n\tshellcode += r"'
         buf += out[i]
     buf += '"'
-    print(buf)
+    print buf
 
 def primitives_precheck():
     failed = False
-    for k, v in list(primitives.items()):
+    for k, v in primitives.items():
         for c in v:
             if c not in VALID_CHARS:
-                print('[!] ERROR: Primitive "%s" contains illegal character in it: (0x%02x, "%c")' % (k, ord(c), c))
-                print('[!] It means you will have to find a suitable primitive yourself and modify the `primitives` dictionary within this script.')
-                print()
+                print '[!] ERROR: Primitive "%s" contains illegal character in it: (0x%02x, "%c")' % (k, ord(c), c)
+                print '[!] It means you will have to find a suitable primitive yourself and modify the `primitives` dictionary within this script.'
+                print
                 failed = True
 
     return not failed
@@ -406,7 +406,7 @@ def main():
         with open(sys.argv[1], 'rb') as f:
             input_bytes = f.read()
 
-    print('[*] Input buffer size: %d bytes.' % (len(input_bytes)))
+    print '[*] Input buffer size: %d bytes.' % (len(input_bytes))
 
     i = 0
     success = False
@@ -420,15 +420,15 @@ def main():
                     with open(sys.argv[2], 'wb') as f:
                         f.write(out)
             else:
-                print('[?] Returned empty payload. Confused...')
+                print '[?] Returned empty payload. Confused...'
 
             break
         except InvalidCharResulted as pr:
-            print('[!] Inter-bytes difference resulted too big rendering invalid char (%x, "%c"). Restarting...' % (ord(str(pr)), str(pr)))
+            print '[!] Inter-bytes difference resulted too big rendering invalid char (%x, "%c"). Restarting...' % (ord(str(pr)), str(pr))
             continue
 
     if not success:
-        print('[!] PROGRAM FAILURE.')
+        print '[!] PROGRAM FAILURE.'
 
 if __name__ == '__main__':
     main()
