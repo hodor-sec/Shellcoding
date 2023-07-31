@@ -21,6 +21,7 @@ import binascii
 import traceback
 import argparse
 import sys
+from os.path import exists
 from keystone import *
 from capstone import *
 
@@ -71,6 +72,11 @@ def assemblebin(code, addr = 0, mode = keystone.KS_MODE_32):
 # Disassemble instructions
 def disassemble(lang,var,asmbuf):
     md = Cs(CS_ARCH_X86, CS_MODE_32)
+    # Customize the mnemonic of "data" instruction
+    md.skipdata_setup = ("db", None, None)
+    # Turn on SKIPDATA mode
+    md.skipdata = True
+
     disasmbuf = ""
 
     # Check which language
@@ -88,7 +94,7 @@ def disassemble(lang,var,asmbuf):
     # Loop ASM buffer
     for i in md.disasm(asmbuf, 0x00):
         opcode = firstchar + "\"\\x" + "\\x".join("{:02x}".format(c) for c in i.bytes) + "\""
-        disasmbuf += f"\t{opcode:<25}" + comment + " "
+        disasmbuf += f"\t{opcode:<35}" + comment + " "
         disasmbuf += f"0x{i.address:<10}"
         disasmbuf += f"{i.mnemonic:<5}"
         disasmbuf += f"{i.op_str:<10}\n"
@@ -124,6 +130,7 @@ def main(argv):
     parser = argparse.ArgumentParser(description='Python ASM assembler and disassembler')
     parser.add_argument("--file", "-f", required=False, help="File to read ASM instructions. Should not contain comments nor headers, just ASM instructions. If no file is given as input, the hardcoded CODE variable in script is used.")
     parser.add_argument("--var", "-v", required=False, help="The name of the Python variable")
+    parser.add_argument("--hexstring", "-hs", required=False, help="Hex encoded oneliner string to disassemble")
     parser.add_argument("--lang", "-l", required=True, help="Output buffer in which style; c or python")
     args = parser.parse_args()
 
@@ -131,6 +138,7 @@ def main(argv):
     variable = args.var
     fileName = args.file
     lang = args.lang
+    hexstring = args.hexstring
 
     # Check variables
     if not variable:
@@ -141,20 +149,31 @@ def main(argv):
 
     # Do stuff
     try:
-        # If file is used, use for buffer. Otherwise, use CODE above.
-        if fileName:
-            fileBuffer = readFile(fileName)
-            print("[+] Orginal code:\n" + fileBuffer + "\n")
-            asmbuf,escbuf,hexbuf,hexcount = convert(fileBuffer)
+        # If hexstring/hexfile (-hs) is used as parameter
+        if hexstring:
+            # Check if it's a file or string
+            if exists(hexstring):
+                with open(hexstring, 'rb') as f:
+                    hexstring = str(binascii.hexlify(f.read()),'utf-8')
+            size = int(len(hexstring)/2)
+            disassembledhex = disassemble(lang,variable,bytes.fromhex(hexstring))
+            print("[+] HEX disassembled string for " + lang + ":\n" + disassembledhex)
+            print("[+] Size: " + str(size) + "\n")
+        # If ASM file is used (-f), use for buffer. Otherwise, use CODE above.
         else:
-            print("[+] Orginal code:\n" + CODE + "\n")
-            asmbuf,escbuf,hexbuf,hexcount = convert(CODE)
+            if fileName:
+                fileBuffer = readFile(fileName)
+                print("[+] Orginal code:\n" + fileBuffer + "\n")
+                asmbuf,escbuf,hexbuf,hexcount = convert(fileBuffer)
+            else:
+                print("[+] Orginal code:\n" + CODE + "\n")
+                asmbuf,escbuf,hexbuf,hexcount = convert(CODE)
 
-        # Print stuff
-        print("[+] ASM converted to HEX escaped:\n" + escbuf + "\n")
-        print("[+] ASM converted to HEX:\n" + hexbuf + "\n")
-        print("[+] HEX disassembled instructions for " + lang + ":\n" + disassemble(lang,variable,asmbuf))
-        print("[+] Size: " + str(hexcount) + "\n")
+            # Print stuff
+            print("[+] ASM converted to HEX escaped:\n" + escbuf + "\n")
+            print("[+] ASM converted to HEX:\n" + hexbuf + "\n")
+            print("[+] HEX disassembled instructions for " + lang + ":\n" + disassemble(lang,variable,asmbuf))
+            print("[+] Size: " + str(hexcount) + "\n")
 
     except Exception:
         traceback.print_exc()
