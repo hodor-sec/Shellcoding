@@ -130,7 +130,7 @@ def main(argv):
     parser = argparse.ArgumentParser(description='Python ASM assembler and disassembler')
     parser.add_argument("--file", "-f", required=False, help="File to read ASM instructions. Should not contain comments nor headers, just ASM instructions. If no file is given as input, the hardcoded CODE variable in script is used.")
     parser.add_argument("--var", "-v", required=False, help="The name of the Python variable")
-    parser.add_argument("--hexstring", "-hs", required=False, help="Hex encoded oneliner string to disassemble")
+    parser.add_argument("--hexstring", "-hs", required=False, help="Hex encoded oneliner string OR bin file to disassemble")
     parser.add_argument("--lang", "-l", required=True, help="Output buffer in which style; c or python")
     args = parser.parse_args()
 
