@@ -81,10 +81,10 @@ def disassemble(lang,var,asmbuf):
 
     # Check which language
     if lang == "py":
-        prefix = var + " = {\n"
+        prefix = var + " = (\n"
         comment = "#"
         firstchar = "b"
-        suffix = "}\n"
+        suffix = ")\n"
     elif lang == "c":
         prefix = "unsigned char " + var + "[] = \\\n"
         comment = "//"
