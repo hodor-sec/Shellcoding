@@ -101,6 +101,7 @@ def disassemble(lang,var,asmbuf):
 
     return prefix + disasmbuf + suffix
 
+# Convert to ASM, binary, hex
 def convert(buffer):
     # Assemble
     asmbuf,count = assembleasm(buffer)
@@ -113,11 +114,43 @@ def convert(buffer):
 
     return asmbuf,escbuf,hexbuf,hexcount
 
-# Attempt to read file
-def readFile(filename):
+# Adds "#" after ";" since Python capstone breaks on uncommented lines, which tries to convert it as ASM
+def replaceComment(fileBuffer):
+    output = ""
+    pycommentchar = "#"
+    asmcommentchar = ";"
+
+    for line in fileBuffer:
+        if asmcommentchar in line:
+            line = line.replace(asmcommentchar, asmcommentchar + pycommentchar)
+            output += line
+        else:
+            output += line
+
+    return output
+
+# Skips the header of ASM files, starting after "_start:"
+def skipHeader(fileBuffer):
+    header = "_start:"
+
+    newLines = []
+    lines = fileBuffer.readlines()
+    prev_index = 0
+    for pos, line in enumerate(lines):
+        if line.startswith(header):
+            prev_index = pos+1
+    newLines += lines[prev_index:]
+    output = ''.join(newLines)
+
+    return output
+
+# Attempt to read ASM file
+def readASMFile(filename):
     try:
-        with open(filename, 'rb') as f:
-            return f.read().decode()
+        with open(filename) as f:
+            f = skipHeader(f)
+            f = replaceComment(f)
+            return f
     except (FileNotFoundError, IOError) as ex:
         print("[!] File not found: " + str(ex) + ".\n")
         exit(1)
@@ -162,11 +195,11 @@ def main(argv):
         # If ASM file is used (-f), use for buffer. Otherwise, use CODE above.
         else:
             if fileName:
-                fileBuffer = readFile(fileName)
-                print("[+] Orginal code:\n" + fileBuffer + "\n")
+                fileBuffer = readASMFile(fileName)
+                print("[+] ASM code:\n" + fileBuffer + "\n")
                 asmbuf,escbuf,hexbuf,hexcount = convert(fileBuffer)
             else:
-                print("[+] Orginal code:\n" + CODE + "\n")
+                print("[+] ASM code:\n" + CODE + "\n")
                 asmbuf,escbuf,hexbuf,hexcount = convert(CODE)
 
             # Print stuff
