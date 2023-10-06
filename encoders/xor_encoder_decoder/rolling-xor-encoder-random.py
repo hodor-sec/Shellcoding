@@ -4,6 +4,8 @@
 # Python Rolling XOR Encoder random byte as first byte
 # Checks on bad characters as well
 #
+# Version 0.7
+# - Fixed odd size error using binascii
 # Version 0.6
 # - Moved to Python3; removed ord() calls as it's redundant for Py3
 # Version 0.5:
@@ -14,6 +16,7 @@ import os
 import sys
 import random
 import binascii
+import traceback
 
 # Check arguments
 if (len(sys.argv) != 2):
@@ -31,17 +34,20 @@ shellcode = []
 # Attempt to read file
 try:
     with open(filename, 'rb') as f:
-        temp = binascii.hexlify(f.read())
+        temp = binascii.hexlify(f.read()).decode()
+        # temp2 = binascii.a2b_hex(f.read().strip())
+        # print(temp2)
         shellcode = binascii.unhexlify(''.join(str(v) for v in temp))
+        # shellcode = temp
 except (FileNotFoundError, IOError) as ex:
     print("[!] File not found: " + str(ex) + ".\n")
     exit(-1)
 except Exception as ex:
-    print("[!] File not found: " + str(ex) + ".\n")
+    print("[!] Error: " + str(ex) + ".\n")
     exit(-1)
 
 # Possible badbytes
-badbytes = ("\x0a\x0d\x00")
+badbytes = (b"\x0a\x0b\x0d\x00\x0c\x20\x09")
 
 # Initialize PRNG
 def initRandom():
@@ -84,4 +90,3 @@ if encoded:
 
     # Print the length of the shellcode
     print('\n[*] Length: %d' % (len(encoded)-1))
-
