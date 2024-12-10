@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [ $# -eq 0 ] 
+if [ $# -eq 0 ]
 then
 	echo "No arguments supplied"
 else
@@ -8,7 +8,7 @@ else
     nasm -f elf32 -o $1.o $1.asm
 
     echo '[+] Linking ...'
-    ld -o $1 $1.o
+    ld -m elf_i386 -o $1 $1.o
 
     echo '[+] Done!'
 fi
