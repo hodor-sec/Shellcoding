@@ -16,7 +16,8 @@ filename = sys.argv[1]
 # Attempt to read file
 try:
     with open(filename, 'rb') as f:
-        print(binascii.hexlify(f.read()))
+        res = binascii.hexlify(f.read())
+        print(res.decode('utf-8'))
 except (FileNotFoundError, IOError) as ex:
     print("[!] File not found: " + str(ex) + ".\n")
     exit(-1)
