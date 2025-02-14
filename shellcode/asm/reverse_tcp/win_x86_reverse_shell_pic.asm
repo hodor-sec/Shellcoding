@@ -186,7 +186,7 @@
         mov eax, 0xff9a879b             ; XORRED "exe"
         neg eax                         ; Negate
         push eax                        ; Push 'exe'
-        push 0x2e646d63                 ; "calc."
+        push 0x2e646d63                 ; "cmd."
         push esp                        ; Push pointer of string
         pop ebx                         ; Store pointer in EBX
 
