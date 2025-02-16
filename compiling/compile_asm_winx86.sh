@@ -14,7 +14,8 @@ fi
 FILENAME="$1"
 ASM_FILE="$FILENAME.asm"
 OBJ_FILE="$FILENAME.o"
-BIN_FILE="$FILENAME.bin"
+EXE_FILE="$FILENAME.exe"
+TEMP_ASM_FILE="$FILENAME.temp.asm"
 
 # Check if the assembly file exists
 if [ ! -f "$ASM_FILE" ]; then
@@ -22,22 +23,29 @@ if [ ! -f "$ASM_FILE" ]; then
     exit 1
 fi
 
+# Process the assembly file: Replace `ptr` with valid NASM syntax
+echo "[+] Preprocessing '$ASM_FILE' to remove 'ptr'..."
+sed 's/\bptr\b//g' "$ASM_FILE" > "$TEMP_ASM_FILE"
+
 # Assemble the .asm file
-echo "[+] Assembling '$ASM_FILE' with Nasm..."
-nasm -f $OSARCH -o $OBJ_FILE $ASM_FILE
+echo "[+] Assembling '$TEMP_ASM_FILE' with Nasm..."
+nasm -f $OSARCH -o $OBJ_FILE "$TEMP_ASM_FILE"
 if [ $? -ne 0 ]; then
     echo "[-] Error: Assembly failed."
     exit 1
 fi
 
 # Link the object file into a binary
-echo "[+] Linking '$OBJ_FILE' to create '$BIN_FILE'..."
-ld -m $BINARCH -o $BIN_FILE $OBJ_FILE
+echo "[+] Linking '$OBJ_FILE' to create '$EXE_FILE'..."
+ld -m $BINARCH -o $EXE_FILE $OBJ_FILE
 if [ $? -ne 0 ]; then
     echo "[-] Error: Linking failed."
     exit 1
 fi
 
+# Clean up temporary file
+rm "$TEMP_ASM_FILE"
+
 # Success message
-echo "[+] Done! Binary '$BIN_FILE' created successfully."
+echo "[+] Done! Binary '$EXE_FILE' created successfully."
 
