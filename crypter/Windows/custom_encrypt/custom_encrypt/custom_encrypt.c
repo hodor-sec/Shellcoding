@@ -4,24 +4,22 @@
 #include <Windows.h>
 #include <conio.h> 
 
-#define MAX_RETRIES 16
 #define AES_KEY_SIZE 32  // 256 bits for AES-256
 #define AES_BLOCK_SIZE 16
+#define MAX_ENCRYPTION_ATTEMPTS 25  // Maximum number of re-encryption attempts
 
 /* Output encrypted and decrypted */
 void print_data(const char* title, const void* data, int len, int is_oneliner, unsigned char* badChars, int badCharsLen);
-
 /* Read contents of a file as argument */
 char* readFile(const char* filename, int* fileSize);
-
 /* Check if any bad character is in the encrypted data */
 int contains_bad_characters(const unsigned char* data, int len, unsigned char* badChars, int badCharsLen);
-
 /* Secure password input for Windows */
 unsigned char* secure_getpass(const char* prompt);
-
 /* Print Help Message */
 void print_help(const char* prog_name);
+/* Encrypt shellcode data */
+void encrypt_data(unsigned char* data, DWORD* dataLen, unsigned char* key, BYTE* iv, BYTE* salt);
 
 int main(int argc, char** argv)
 {
@@ -32,11 +30,13 @@ int main(int argc, char** argv)
     }
 
     // Variables
-    int lenBits = AES_KEY_SIZE * 8;  // AES-256 (256 bits)
-    char* shell_in;     // Entered input
     int lenShell;       // Length of shellcode
+    char* shell_in;     // Entered input
     unsigned char* badChars = NULL;
     int badCharsLen = 0;
+    int cryptIterations = 25;
+    BYTE iv[AES_BLOCK_SIZE];
+    BYTE salt[16];
 
     // Process -b argument for bad characters
     for (int i = 2; i < argc; i++) {
@@ -46,7 +46,6 @@ int main(int argc, char** argv)
             badCharsLen = len / 4;  // Each bad byte is specified as \xNN (4 chars)
             badChars = malloc(badCharsLen);
             for (int j = 0; j < badCharsLen; j++) {
-                // Update to use sscanf_s instead of sscanf
                 sscanf_s(argv[i + 1] + j * 4 + 2, "%2hhx", &badChars[j], (unsigned)_countof(badChars));  // Skipping "\x"
             }
             break;
@@ -59,53 +58,34 @@ int main(int argc, char** argv)
         exit(-1);
     }
 
-    // Password input using secure_getpass (Windows alternative to getpass)
+    // Password input using secure_getpass
     unsigned char* key = secure_getpass("Enter password to encrypt: ");
     int lenKey = strlen((char*)key);
 
-    // Cryptographic context and key handle
-    HCRYPTPROV hCryptProv = 0;
-    HCRYPTKEY hKey = 0;
+    // Encrypt the shellcode
+    DWORD dwDataLen = lenShell; // Length of data to encrypt
+    encrypt_data((unsigned char*)shell_in, &dwDataLen, key, iv, salt);
 
-    // Acquire a cryptographic context
-    if (CryptAcquireContext(&hCryptProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) == 0) {
-        printf("Error during CryptAcquireContext: %lu\n", GetLastError());
-        exit(-1);  // Exit if we cannot acquire context
+    // Try to re-encrypt the shellcode if bad characters are found, up to MAX_ENCRYPTION_ATTEMPTS
+    int attempt = 0;
+    while (contains_bad_characters((unsigned char*)shell_in, dwDataLen, badChars, badCharsLen) != 0 && attempt < MAX_ENCRYPTION_ATTEMPTS) {
+        printf("\n[!] Encrypted data contains bad characters, re-encrypting (attempt %d/%d)...\n", attempt + 1, MAX_ENCRYPTION_ATTEMPTS);
+
+        // Re-encrypt the shellcode
+        encrypt_data((unsigned char*)shell_in, &dwDataLen, key, iv, salt);
+        attempt++;
     }
 
-    // Generate AES key (AES-256)
-    if (CryptGenKey(hCryptProv, CALG_AES_256, CRYPT_EXPORTABLE, &hKey) == 0) {
-        printf("Error during CryptGenKey: %lu\n", GetLastError());
-        exit(-1);  // Exit if key generation fails
+    // After max attempts, report the result
+    if (attempt == MAX_ENCRYPTION_ATTEMPTS) {
+        printf("\n[!] Maximum encryption attempts reached. Bad characters may still be present.\n");
+    }
+    else {
+        printf("\n[+] Re-encryption successful after %d attempts.\n", attempt + 1);
     }
 
-    // Buffers for encryption
-    DWORD dwDataLen = lenShell;  // Length of data to encrypt
-    BYTE* encryptedData = malloc(dwDataLen + AES_BLOCK_SIZE);  // Ensure extra space for padding
-    memset(encryptedData, 0, dwDataLen + AES_BLOCK_SIZE);  // Clear memory before use
-
-    // Generate a random IV
-    BYTE iv[AES_BLOCK_SIZE];
-    if (CryptGenRandom(hCryptProv, AES_BLOCK_SIZE, iv) == 0) {
-        printf("Error during IV generation: %lu\n", GetLastError());
-        exit(-1);
-    }
-
-    // Generate a random salt
-    BYTE salt[16];
-    if (CryptGenRandom(hCryptProv, sizeof(salt), salt) == 0) {
-        printf("Error during salt generation: %lu\n", GetLastError());
-        exit(-1);
-    }
-
-    // Perform encryption
-    if (CryptEncrypt(hKey, 0, TRUE, 0, encryptedData, &dwDataLen, dwDataLen + AES_BLOCK_SIZE) == 0) {
-        printf("Error during encryption: %lu\n", GetLastError());
-        exit(-1);  // Exit if encryption fails
-    }
-
-    // Output encrypted data
-    print_data("\nENCRYPTED", encryptedData, dwDataLen, 1, badChars, badCharsLen);
+    // Output the final encrypted data
+    print_data("\nFINAL ENCRYPTED", shell_in, dwDataLen, 1, badChars, badCharsLen);
 
     // Print shellcode length
     printf("\nShellcode length:\n");
@@ -129,16 +109,57 @@ int main(int argc, char** argv)
     for (int i = 0; i < lenKey; i++) {
         printf("\\x%02X", key[i]);
     }
-    printf("\n");
+    printf("\n\nDone\n");
 
-    // Clean up sensitive information
+    // Clean up
     memset(key, 0, lenKey);  // Clear the key after use
-    free(encryptedData);
+    free(shell_in);
     free(badChars);
-    CryptDestroyKey(hKey);
-    CryptReleaseContext(hCryptProv, 0);
 
     return 0;
+}
+
+void encrypt_data(unsigned char* data, DWORD* dataLen, unsigned char* key, BYTE* iv, BYTE* salt) {
+    // Key length
+    int lenKey = strlen((char*)key);
+
+    // Cryptographic context and key handle
+    HCRYPTPROV hCryptProv = 0;
+    HCRYPTKEY hKey = 0;
+
+    // Acquire a cryptographic context
+    if (CryptAcquireContext(&hCryptProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) == 0) {
+        printf("Error during CryptAcquireContext: %lu\n", GetLastError());
+        exit(-1);  // Exit if we cannot acquire context
+    }
+
+    // Generate AES key (AES-256)
+    if (CryptGenKey(hCryptProv, CALG_AES_256, CRYPT_EXPORTABLE, &hKey) == 0) {
+        printf("Error during CryptGenKey: %lu\n", GetLastError());
+        exit(-1);  // Exit if key generation fails
+    }
+
+    // Generate a random IV
+    if (CryptGenRandom(hCryptProv, AES_BLOCK_SIZE, iv) == 0) {
+        printf("Error during IV generation: %lu\n", GetLastError());
+        exit(-1);
+    }
+
+    // Generate a random salt
+    if (CryptGenRandom(hCryptProv, sizeof(salt), salt) == 0) {
+        printf("Error during salt generation: %lu\n", GetLastError());
+        exit(-1);
+    }
+
+    // Perform encryption
+    if (CryptEncrypt(hKey, 0, TRUE, 0, data, dataLen, *dataLen + AES_BLOCK_SIZE) == 0) {
+        printf("Error during encryption: %lu\n", GetLastError());
+        exit(-1);  // Exit if encryption fails
+    }
+
+    // Cleanup
+    CryptDestroyKey(hKey);
+    CryptReleaseContext(hCryptProv, 0);
 }
 
 char* readFile(const char* fileName, int* fileSize) {
@@ -189,8 +210,7 @@ int contains_bad_characters(const unsigned char* data, int len, unsigned char* b
     return 0;  // No bad characters found
 }
 
-void print_data(const char* title, const void* data, int len, int is_oneliner, unsigned char* badChars, int badCharsLen)
-{
+void print_data(const char* title, const void* data, int len, int is_oneliner, unsigned char* badChars, int badCharsLen) {
     printf("%s:\n", title);
     unsigned char* p = (unsigned char*)data;
 
