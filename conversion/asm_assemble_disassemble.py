@@ -15,6 +15,7 @@
 
 import traceback
 import argparse
+import binascii
 from os.path import exists
 from keystone import *
 from capstone import *
@@ -70,7 +71,7 @@ class Colors:
             del kernel32
 
 # Example partial ASM code
-asm = (
+sample_asm_x86 = (
         " start:                                ;"  #
         "    int3                               ;"  # REMOVE WHEN NOT DEBUGGING
         "    mov ebp, esp                       ;"  #
@@ -92,6 +93,34 @@ asm = (
         "    jne next_module                    ;"  # No; try next module
         "    ret                                ;"  # RET
 )
+sample_asm_x64 = (
+    " start:                                    ;"  #
+    "   int3                                    ;"  #
+    "   add rsp, 0xfffffffffffffdf8             ;"  # Avoid Null Byte
+    " locate_kernel32:                          ;"
+    "   xor rcx, rcx                            ;"  # Zero RCX contents
+    "   mov rax, gs:[rcx + 0x60]                ;"  # 0x060 ProcessEnvironmentBlock to RAX.
+    "   mov rax, [rax + 0x18]                   ;"  # 0x18  ProcessEnvironmentBlock.Ldr Offset
+    "   mov rsi, [rax + 0x20]                   ;"  # 0x20 Offset = ProcessEnvironmentBlock.Ldr.InMemoryOrderModuleList
+    "   lodsq                                   ;"  # Load qword at address (R)SI into RAX (ProcessEnvironmentBlock.Ldr.InMemoryOrderModuleList)
+    "   xchg rax, rsi                           ;"  # Swap RAX,RSI
+    "   lodsq                                   ;"  # Load qword at address (R)SI into RAX
+    "   mov rbx, [rax + 0x20]                   ;"  # RBX = Kernel32 base address
+    "   mov r8, rbx                             ;"  # Copy Kernel32 base address to R8 register
+    #" ; Code for parsing Export Address Table   ;"
+    "   mov ebx, [rbx+0x3C]                     ;"  # Get Kernel32 PE Signature (offset 0x3C) into EBX
+    "   add rbx, r8                             ;"  # Add defrerenced signature offset to kernel32 base. Store in RBX.
+    "   mov edx, [rbx+0x88]                     ;"  # Offset from PE32 Signature to Export Address Table (NULL BYTE)
+    "   xor r12,r12                             ;"
+    "   add r12, 0x88FFFFF                      ;"
+    "   shr r12, 0x14                           ;"
+    "   mov edx, [rbx+r12]                      ;"  # Offset from PE32 Signature to Export Address Table
+    "   add rdx, r8                             ;"  # RDX = kernel32.dll + RVA ExportTable = ExportTable Address
+    "   mov r10d, [rdx+0x14]                    ;"  # Number of functions
+    "   xor r11, r11                            ;"  # Zero R11 before use
+    "   mov r11d, [rdx+0x20]                    ;"  # AddressOfNames RVA
+    "   add r11, r8                             ;"  # AddressOfNames VMA
+)
 
 # Handle CTRL-C
 def keyboard_interrupt():
@@ -100,14 +129,14 @@ def keyboard_interrupt():
     exit(1)
 
 # Assemble binary instructions to ASM code
-def assemble(code, addr=0, mode=KS_MODE_32, debug=False):
+def assemble(code, ks_arch,ks_mode, addr=0, debug=False):
     try:
         bincode = ""
-        eng = Ks(KS_ARCH_X86, mode)
+        eng = Ks(ks_arch, ks_mode)
         asmbuf, count = eng.asm(code)
         if debug:
             print("%s = %s" %(code, asmbuf))
-        for enc in asmbuf:
+        for enc in asmbuf:  
             bincode += "\\x{0:02x}".format(enc)
         return asmbuf, bincode
     except KsError as e:
@@ -134,11 +163,11 @@ def get_visible_length(byte_str):
     return len(byte_str.replace(Colors.RED, "").replace(Colors.END, ""))
 
 # Check assembly instructions, line by line
-def check_asm(buffer, architecture=keystone.KS_ARCH_X86, mode=keystone.KS_MODE_32):
+def check_asm(buffer, ks_arch, ks_mode):
     res = []
     try:
         # Initialize the Keystone assembler
-        ks = Ks(architecture, mode)
+        ks = Ks(ks_arch, ks_mode)
 
         # Try to assemble each line individually
         for line_num, line in enumerate(buffer, 1):
@@ -153,10 +182,10 @@ def check_asm(buffer, architecture=keystone.KS_ARCH_X86, mode=keystone.KS_MODE_3
     return res
 
 # Disassemble instructions
-def disassemble(lang,var,asmbuf):
+def disassemble(lang,var,asmbuf,cs_arch,cs_mode):
     if not asmbuf:
         raise ValueError("[!] Assembled buffer is empty!")
-    md = Cs(CS_ARCH_X86, CS_MODE_32)
+    md = Cs(cs_arch,cs_mode)
     # Customize the mnemonic of "data" instruction
     md.skipdata_setup = ("db", None, None)
     # Turn on SKIPDATA mode
@@ -181,7 +210,7 @@ def disassemble(lang,var,asmbuf):
         bytes_str = []
         # Check and color bad chars
         lenbc = 0
-        opcodewidth = 35
+        opcodewidth = 50
         for c in i.bytes:
             fmtbyte = "{:02x}".format(c)
             if c in badchars:
@@ -203,10 +232,10 @@ def disassemble(lang,var,asmbuf):
     return prefix + disasmbuf + suffix
 
 # Convert to ASM, binary, hex
-def convert_asm(buffer):
+def convert_asm(buffer,ks_arch,ks_mode):
     try:
         # Assemble
-        asmcode,bincode = assemble(buffer)
+        asmcode,bincode = assemble(buffer,ks_arch,ks_mode)
         # Convert assembled buffer to hex string
         hexbuf = "".join(f"{byte:02x}" for byte in asmcode)
         # Calculate the number of hex characters
@@ -293,6 +322,20 @@ def read_asmfile(filename):
         traceback.print_exc()
         exit(1)
 
+# Attempt to read BIN file
+def read_binfile(filename):
+    try:
+        with open(filename,'rb') as fn:
+            fcontent = fn.read()
+            hex_data = binascii.hexlify(fcontent).decode('utf-8')
+            return hex_data
+    except (FileNotFoundError, IOError) as ex:
+        print("[!] File not found: " + str(ex) + ".\n")
+        exit(1)
+    except Exception:
+        traceback.print_exc()
+        exit(1)
+
 # Parse the badhcars given as argument
 def parse_badchars(badchars_str):
     if badchars_str:
@@ -305,20 +348,40 @@ def parse_badchars(badchars_str):
 def main(args):
     # Do stuff
     try:
+        cs_arch = CS_ARCH_X86
+        ks_arch = KS_ARCH_X86
+        # Process architecture 
+        if args.arch == "64":
+            cs_mode = CS_MODE_64
+            ks_mode = KS_MODE_64
+            sample_asm = sample_asm_x64
+        else:
+            cs_mode = CS_MODE_32
+            ks_mode = KS_MODE_32
+            sample_asm = sample_asm_x86
+        # Parse badchars
         if args.badchars:
             parse_badchars(args.badchars)
         # Process hexstring
         if args.hexstring:
             # Process and disassemble hexstring
             size = len(args.hexstring) // 2
-            disassembled = disassemble(args.lang, args.var, bytes.fromhex(args.hexstring))
+            disassembled = disassemble(args.lang, args.var, bytes.fromhex(args.hexstring),cs_arch,cs_mode)
             print(f"[+] HEX disassembled string for {args.lang}:\n{disassembled}")
             print(f"[+] Size: {size}\n")
-        elif args.file:
+        elif args.binfile:
             # Read from file
-            buffer = read_asmfile(args.file)
-            binbuf, hexbuf, hexcount = convert_asm(buffer)
-            disassembled = disassemble(args.lang, args.var, bytes.fromhex(hexbuf))
+            buffer = read_binfile(args.binfile)
+            # Process and disassemble hexstring
+            size = len(buffer) // 2
+            disassembled = disassemble(args.lang, args.var, bytes.fromhex(buffer),cs_arch,cs_mode)
+            print(f"[+] HEX disassembled string for {args.lang}:\n{disassembled}")
+            print(f"[+] Size: {size}\n")            
+        elif args.asmfile:
+            # Read from file
+            buffer = read_asmfile(args.asmfile)
+            binbuf, hexbuf, hexcount = convert_asm(buffer,ks_arch,ks_mode)
+            disassembled = disassemble(args.lang, args.var, bytes.fromhex(hexbuf),cs_arch,cs_mode)
             # Nicely print output
             print(f"[+] ASM converted to HEX escaped:\n{binbuf}\n")
             print(f"[+] ASM converted to HEX:\n{hexbuf}\n")
@@ -326,8 +389,8 @@ def main(args):
             print(f"[+] Size: {hexcount}\n")            
         else:
             # If no hexstring, use hardcoded asm
-            binbuf, hexbuf, hexcount = convert_asm(asm)
-            disassembled = disassemble(args.lang, args.var, bytes.fromhex(hexbuf))
+            binbuf, hexbuf, hexcount = convert_asm(sample_asm,ks_arch,ks_mode)
+            disassembled = disassemble(args.lang, args.var, bytes.fromhex(hexbuf),cs_arch,cs_mode)
             # Nicely print output
             print(f"[+] ASM converted to HEX escaped:\n{binbuf}\n")
             print(f"[+] ASM converted to HEX:\n{hexbuf}\n")
@@ -349,10 +412,12 @@ if __name__ == "__main__":
         formatter_class=argparse.RawTextHelpFormatter  
     )    
     parser.add_argument("--lang", "-l", required=True, choices=["py", "c"], help="Output language style: 'py' for Python or 'c' for C. Required")
+    parser.add_argument("--arch", "-a", required=True, choices=["32", "64"], help="32 or 64 bits architecture. Required")
+    parser.add_argument("--asmfile", required=False, help="ASM file containing instructions (no comments/headers). Optional")
+    parser.add_argument("--binfile", required=False, help="BIN file containing binary payload. Optional")
     parser.add_argument("--hexstring", "-hs", required=False, help="Hex-encoded string to disassemble. Optional")
-    parser.add_argument("--file", "-f", required=False, help="ASM file containing instructions (no comments/headers). Optional")
-    parser.add_argument("--var", "-v", required=False, default="shellcode", help="The name of the Python variable for storing shellcode. Optional")
     parser.add_argument("--badchars", "-b", required=False, help="Bad characters to avoid in shellcode (hex-encoded, e.g. '\\x0a\\x0d\\x00'). Coloured output. Optional")
+    parser.add_argument("--var", "-v", required=False, default="shellcode", help="The name of the Python variable for storing shellcode. Optional")
         
     args = parser.parse_args()
     
