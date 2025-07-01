@@ -136,7 +136,7 @@ def assemble(code, ks_arch,ks_mode, addr=0, debug=False):
         asmbuf, count = eng.asm(code)
         if debug:
             print("%s = %s" %(code, asmbuf))
-        for enc in asmbuf:  
+        for enc in asmbuf:
             bincode += "\\x{0:02x}".format(enc)
         return asmbuf, bincode
     except KsError as e:
@@ -221,9 +221,9 @@ def disassemble(lang,var,asmbuf,cs_arch,cs_mode):
         while lenbc != 0:
             opcodewidth += 11
             lenbc -= 1
-            
+
         # Create buf
-        opcode = firstchar 
+        opcode = firstchar
         opcode += "\"\\x"
         opcode += "\\x".join(bytes_str)
         opcode += "\""
@@ -281,7 +281,7 @@ def removeComments(fileBuffer):
 # Remove potential headers from ASM files
 # Keysone doesn't always like all headers and still might error, even after removal
 def skipHeader(fileBuffer):
-    header_markers = ["_start:", "[BITS 32]","[bits 32]", "[bits 64]", "[global]", ";", "section", "extern"]
+    header_markers = ["_start:", "BITS 32","bits 32", "bits 64", "[global]", ";", "section", "extern"]
     skip = True
     newLines = []
 
@@ -376,7 +376,7 @@ def main(args):
             size = len(buffer) // 2
             disassembled = disassemble(args.lang, args.var, bytes.fromhex(buffer),cs_arch,cs_mode)
             print(f"[+] HEX disassembled string for {args.lang}:\n{disassembled}")
-            print(f"[+] Size: {size}\n")            
+            print(f"[+] Size: {size}\n")
         elif args.asmfile:
             # Read from file
             buffer = read_asmfile(args.asmfile)
@@ -386,7 +386,7 @@ def main(args):
             print(f"[+] ASM converted to HEX escaped:\n{binbuf}\n")
             print(f"[+] ASM converted to HEX:\n{hexbuf}\n")
             print(f"[+] HEX disassembled string for {args.lang}:\n{disassembled}")
-            print(f"[+] Size: {hexcount}\n")            
+            print(f"[+] Size: {hexcount}\n")
         else:
             # If no hexstring, use hardcoded asm
             binbuf, hexbuf, hexcount = convert_asm(sample_asm,ks_arch,ks_mode)
@@ -408,9 +408,9 @@ if __name__ == "__main__":
     """Parse and return the command-line arguments."""
     parser = argparse.ArgumentParser(
         description='Custom Python ASM assembler and disassembler using keystone and capstone. ',
-        epilog=known_issues, 
-        formatter_class=argparse.RawTextHelpFormatter  
-    )    
+        epilog=known_issues,
+        formatter_class=argparse.RawTextHelpFormatter
+    )
     parser.add_argument("--lang", "-l", required=True, choices=["py", "c"], help="Output language style: 'py' for Python or 'c' for C. Required")
     parser.add_argument("--mode", "-m", required=True, choices=["32", "64"], help="32 or 64 bits mode. Required")
     parser.add_argument("--asmfile", required=False, help="ASM file containing instructions (no comments/headers). Optional")
@@ -418,8 +418,8 @@ if __name__ == "__main__":
     parser.add_argument("--hexstring", "-hs", required=False, help="Hex-encoded string to disassemble. Optional")
     parser.add_argument("--badchars", "-b", required=False, help="Bad characters to avoid in shellcode (hex-encoded, e.g. '\\x0a\\x0d\\x00'). Coloured output. Optional")
     parser.add_argument("--var", "-v", required=False, default="shellcode", help="The name of the Python variable for storing shellcode. Optional")
-        
+
     args = parser.parse_args()
-    
+
     main(args)
 
