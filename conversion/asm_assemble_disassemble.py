@@ -350,8 +350,8 @@ def main(args):
     try:
         cs_arch = CS_ARCH_X86
         ks_arch = KS_ARCH_X86
-        # Process architecture 
-        if args.arch == "64":
+        # Process mode
+        if args.mode == "64":
             cs_mode = CS_MODE_64
             ks_mode = KS_MODE_64
             sample_asm = sample_asm_x64
@@ -412,7 +412,7 @@ if __name__ == "__main__":
         formatter_class=argparse.RawTextHelpFormatter  
     )    
     parser.add_argument("--lang", "-l", required=True, choices=["py", "c"], help="Output language style: 'py' for Python or 'c' for C. Required")
-    parser.add_argument("--arch", "-a", required=True, choices=["32", "64"], help="32 or 64 bits architecture. Required")
+    parser.add_argument("--mode", "-m", required=True, choices=["32", "64"], help="32 or 64 bits mode. Required")
     parser.add_argument("--asmfile", required=False, help="ASM file containing instructions (no comments/headers). Optional")
     parser.add_argument("--binfile", required=False, help="BIN file containing binary payload. Optional")
     parser.add_argument("--hexstring", "-hs", required=False, help="Hex-encoded string to disassemble. Optional")
