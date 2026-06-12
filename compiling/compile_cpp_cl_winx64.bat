@@ -3,15 +3,15 @@ setlocal enabledelayedexpansion
 
 REM === Compiler and default options ===
 set COMPILER=cl
-set OPTIONS=/O2 /GL /Gy /W3 /GS /Zc:wchar_t /Zc:inline /fp:precise /D NDEBUG /D _CONSOLE /D _UNICODE /D UNICODE /Zc:forScope /Gd /Oi /MD /EHsc /nologo /permissive- /FC /diagnostics:column
+set OPTIONS=/O2 /GL /Gy /W3 /GS /Zc:wchar_t /Zc:inline /fp:precise /D NDEBUG /D _CONSOLE /std:c++17 /D _UNICODE /D UNICODE /Zc:forScope /Gd /Oi /MD /EHsc /nologo /permissive- /FC /diagnostics:column
 
 REM === Linker options for optimization and small size ===
 set LINK_OPTS=/SUBSYSTEM:CONSOLE /OPT:REF /OPT:ICF /INCREMENTAL:NO /LTCG /MANIFEST:NO
 
 REM === Check input arguments ===
 if "%~1"=="" (
-    echo Usage: %~nx0 filename.c [optional libraries...]
-    echo Example: %~nx0 aes.c bcrypt.lib advapi32.lib
+    echo Usage: %~nx0 filename.cpp [optional libraries...]
+    echo Example: %~nx0 aes.cpp bcrypt.lib advapi32.lib
     echo Example: %~nx0 program.cpp kernel32.lib user32.lib advapi32.lib
     exit /b 1
 )
